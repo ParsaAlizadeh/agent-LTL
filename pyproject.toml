@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentltl"
+version = "0.1.0"
+description = "Verifier-gated agent loop using LTL policies"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["agentltl*"]
