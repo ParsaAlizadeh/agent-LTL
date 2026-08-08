@@ -8,18 +8,74 @@ from dataclasses import dataclass
 
 @dataclass
 class SpotVerifier:
-    tool_names: list[str]
+    def __init__(self, tool_names: list[str], formula: str):
+        self.tool_names = tool_names
+        self.backend = SpotBackend(formula)
+        self.current_set = self.backend.get_starting_set()
 
     def verify_tool_batch(
         self, batch_id: str, calls: list[ToolCall]
     ) -> VerifierDecision:
-        pass
+        back_res = self.backend.do_transition(
+            self.current_set, set(call.name for call in calls)
+        )
+        if back_res.safety_error is None:
+            self.current_set = back_res.next_set
+            return VerifierDecision(allowed=True)
+        safety_err = back_res.safety_error
+        message = (
+            f'The tools you have used in the batch {batch_id} violates the safety '
+            f'condition. Try again. Your next response must satisfy the boolean '
+            f'condition "{safety_err.condition_text}".'
+        )
+        if safety_err.satisfiable_examples:
+            example = safety_err.satisfiable_examples[0]
+            if len(example) == 0:
+                message += (
+                    f' One such example is to use no tools.'
+                )
+            elif len(example) == 1:
+                message += (
+                    f' One such example is to only use the tool {example[0]}.'
+                )
+            else:
+                message += (
+                    f' One such example is to use the tools '
+                    f'{' and '.join(example)}.'
+                )
+        return VerifierDecision(allowed=False, message=message)
 
     def verify_halt(self) -> VerifierDecision:
         pass
 
 
 class SpotBackend:
+    @dataclass
+    class SafetyError:
+        # Boolean condition of what needs to be satisifed, in human-readable text
+        condition_text: str
+
+        # Examples of satisfiable tool calls
+        satisfiable_examples: list[list[str]]
+
+    @dataclass
+    class LivenessError:
+        # True if the model has a path to halt. Otherwise the LTL condition forces the model to loop
+        # forever.
+        can_halt: bool
+
+        # If halting is possible, this contains a list of paths that would reach a valid halting state
+        halt_examples: list[list[list[str]]] | None = None
+
+    @dataclass
+    class TransitionResult:
+        safety_error: SpotBackend.SafetyError | None = None
+        next_set: set[int]
+
+    @dataclass
+    class HaltResult:
+        liveness_error: SpotBackend.LivenessError | None = None
+
     @dataclass
     class Edge:
         """
@@ -51,7 +107,49 @@ class SpotBackend:
         # self.user_write_scc(self.scc_info)
 
         self.bdd_dict = self.automata.get_dict()
+        self.halting_states = self.get_halting_states()
 
+    def get_starting_set(self) -> set[int]:
+        return {self.automata.get_init_state_number()}
+
+    def do_transition(self, current_set: set[int], transition_set: set[str]) -> TransitionResult:
+        transet = self.make_transet(transition_set)
+        next_set = self.advance(current_set, transet)
+        if not next_set:
+            valid_bdd = self.valid_transition_bdd(current_set)
+            min_sat = self.bdd_minimal_sat(valid_bdd)
+            return self.TransitionResult(
+                safety_error=self.SafetyError(
+                    condition_text=self.write_bdd(valid_bdd),
+                    satisfiable_examples=[min_sat]
+                ),
+                next_set=current_set
+            )
+        return self.TransitionResult(next_set=next_set)
+
+    def do_halt(self, current_set: set[int]) -> HaltResult:
+        if not self.halting_states:
+            return self.HaltResult(
+                liveness_error=self.LivenessError(
+                    can_halt=False
+                )
+            )
+        for state in current_set:
+            if state in self.halting_states:
+                return self.HaltResult()
+        path = self.write_one_halting_path(current_set)
+        if path == 'no-path':
+            return self.HaltResult(
+                liveness_error=self.LivenessError(
+                    can_halt=False
+                )
+            )
+        return self.HaltResult(
+            liveness_error=self.LivenessError(
+                can_halt=True,
+                halt_examples=[path]
+            )
+        )
 
     def get_edges(self, u):
         """
