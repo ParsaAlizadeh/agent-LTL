@@ -104,8 +104,6 @@ class Verifier(Protocol):
         self, batch_id: str, calls: list[ToolCall]
     ) -> VerifierDecision: ...
 
-    def record_tool_execution(self, call: ToolCall) -> None: ...
-
     def verify_halt(self) -> VerifierDecision: ...
 
 
@@ -161,10 +159,11 @@ class PlaceholderVerifier:
                 ),
             )
 
+        for call in calls:
+            self.executed_tool_names.append(call.name)
+
         return VerifierDecision(allowed=True)
 
-    def record_tool_execution(self, call: ToolCall) -> None:
-        self.executed_tool_names.append(call.name)
 
     def verify_halt(self) -> VerifierDecision:
         if "tool_a" not in self.executed_tool_names:
@@ -279,6 +278,10 @@ class AgentLoop:
         self.history: list[dict[str, Any]] = []
         self._batch_number = 0
 
+        self.opt_hide_reasoning = False
+        self.opt_list_tool_names = True
+        self.opt_hide_tool_output = True
+
     async def run(self) -> str:
         turns = 0
 
@@ -297,23 +300,31 @@ class AgentLoop:
             output_items = [_item_to_dict(item) for item in response.output]
             self.history.extend(output_items)
 
-            reasoning_texts = [
-                summary.text
-                for item in response.output
-                if item.type == "reasoning"
-                for summary in item.summary
-            ]
-            self.console.assistant('[Reasoning]\n' + '\n'.join(reasoning_texts))
+            if not self.opt_hide_reasoning:
+                reasoning_texts = [
+                    summary.text
+                    for item in response.output
+                    if item.type == "reasoning"
+                    for summary in item.summary
+                ]
+                self.console.assistant('[Reasoning]\n' + '\n'.join(reasoning_texts))
 
             assistant_text = _response_text(response, output_items)
             self.console.assistant(assistant_text or "[no text]")
 
             calls = _extract_tool_calls(output_items)
 
-            for call in calls:
-                self.console.tool(
-                    f"{call.name} call_id={call.call_id} arguments={call.arguments_json}"
-                )
+            if self.opt_list_tool_names:
+                if calls:
+                    self.console.tool(' '.join(f"{call.name}" for call in calls))
+                else:
+                    self.console.tool('[no tool]')
+            else:
+                for call in calls:
+                    self.console.tool(
+                        f"{call.name} call_id={call.call_id} "
+                        f"arguments={call.arguments_json}"
+                    )
 
             self._batch_number += 1
             batch_id = f"batch_{self._batch_number:04d}"
@@ -373,9 +384,10 @@ class AgentLoop:
             "output": json.dumps(payload, sort_keys=True),
         }
         self.history.append(output)
-        self.console.tool(
-            f"Result for {call.name} call_id={call.call_id}: {output['output']}"
-        )
+        if not self.opt_hide_tool_output:
+            self.console.tool(
+                f"Result for {call.name} call_id={call.call_id}: {output['output']}"
+            )
 
     def _append_user_message(self, message: str) -> None:
         self.history.append({"role": "user", "content": message})
@@ -470,6 +482,25 @@ def make_env_settings() -> Settings:
         max_turns=MAX_TURNS,
         max_output_tokens=MAX_OUTPUT_TOKENS,
         request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+    )
+
+
+def cli_prepare():
+    global console, settings, client, provider, verifier, loop
+
+    console = Console()
+    settings = make_env_settings()
+    client = create_client(settings)
+    provider = OpenAIResponsesProvider(client, settings)
+    verifier = PlaceholderVerifier(
+        known_tools={tool["name"] for tool in TOOLS}
+    )
+    loop = AgentLoop(
+        provider=provider,
+        verifier=verifier,
+        tools=TOOLS,
+        console=console,
+        max_turns=settings.max_turns,
     )
 
 
