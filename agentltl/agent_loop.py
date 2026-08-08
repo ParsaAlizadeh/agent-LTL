@@ -148,10 +148,14 @@ class Console:
     def log(self, message: str) -> None:
         self._write("Log", message)
 
-    def prompt_for_user(self) -> str:
+    def prompt_for_user(self) -> str | None:
         prefix = self._make_prefix('User', self.ROLES['User'])
         print('-' * 90)
-        return input(f"{prefix} ").strip()
+        try:
+            return input(f"{prefix} ").strip()
+        except KeyboardInterrupt:
+            print(file=self.stream, flush=True)
+            return None
 
     def print(self, message):
         output = '\n'.join(textwrap.wrap(message))
@@ -207,7 +211,14 @@ class AgentLoop:
         turns = 0
 
         initial_user_message = self.console.prompt_for_user()
-        self._append_user_message(initial_user_message)
+        if initial_user_message is None:
+            self.console.log("Interrupted. Exiting.")
+            return
+        if initial_user_message:
+            self._append_user_message(initial_user_message)
+        elif self._request_halt():
+            self.console.log("Conversation complete.")
+            return
 
         while turns < self.max_turns:
             turns += 1
@@ -279,24 +290,32 @@ class AgentLoop:
                 self._append_tool_output(call, payload)
 
             user_message = self.console.prompt_for_user()
-            if user_message.strip():
+            if user_message is None:
+                self.console.log("Interrupted. Exiting.")
+                return
+            if user_message:
                 self._append_user_message(user_message)
                 continue
 
-            halt_decision = self.verifier.verify_halt()
-            if halt_decision.allowed:
-                self.console.verifier("Halting accepted.")
+            if self._request_halt():
                 break
 
-            error = halt_decision.message or "The verifier rejected halting."
-            self.console.verifier(f"Halting rejected: {error}")
-            feedback = (
-                "[Verifier halt rejection]\n"
-                f"{error}\n"
-            )
-            self._append_user_message(feedback)
-
         self.console.log(f'Conversation complete.')
+
+    def _request_halt(self) -> bool:
+        halt_decision = self.verifier.verify_halt()
+        if halt_decision.allowed:
+            self.console.verifier("Halting accepted.")
+            return True
+
+        error = halt_decision.message or "The verifier rejected halting."
+        self.console.verifier(f"Halting rejected: {error}")
+        feedback = (
+            "[Verifier halt rejection]\n"
+            f"{error}\n"
+        )
+        self._append_user_message(feedback)
+        return False
 
     def _append_tool_output(self, call: ToolCall, payload: dict[str, Any]) -> None:
         output = {
