@@ -1,0 +1,14 @@
+[tools.open]
+description = "Open the record's file"
+parameters = { reason = "Short description of why the record must be opened" }
+
+[tools.close]
+description = "Close the record's file"
+parameters = { reason = "Short description of why the record can be closed" }
+
+[scenario.close_after_open]
+formula = "G(!(open & close)) & G(open -> X(!open U close))"
+instructions = "When you open the record, close it before ending the procedure."
+
+[scenario.alternate]
+formula = "(!close U open) & G(open -> X(!open U close)) & G(close -> X(!close W open))"

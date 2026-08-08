@@ -5,14 +5,15 @@ import copy
 import json
 import os
 import sys
-from dataclasses import dataclass, field
-from typing import Any, Protocol
 import textwrap
+from dataclasses import dataclass
+from typing import Any
 
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
-from .types import ToolCall, VerifierDecision, ResponseProvider, Verifier
+from .scenario import ScenarioConfig, ScenarioError, load_scenario
 from .spot_verifier import SpotVerifier
+from .types import ResponseProvider, ToolCall, Verifier
 
 
 # Provider configuration. Environment variables and matching CLI flags can
@@ -25,34 +26,6 @@ MAX_TURNS = int(os.getenv("AGENT_MAX_TURNS", "50"))
 MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_OUTPUT_TOKENS", "2048"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("AGENT_REQUEST_TIMEOUT", "180"))
 
-
-# Edit this list to define the only tools visible to the model. Each
-# ``parameters`` value is a JSON Schema describing that tool's input.
-ABSTRACT_TOOL_PARAMETER = {
-    "type": "object",
-    "properties": {
-        "reason": {
-            "type": "string",
-            "description": "short description of why you called this tool.",
-        }
-    },
-    "required": ["reason"],
-    "additionalProperties": False,
-}
-
-def _make_tool(name, description):
-    return {
-        "type": "function",
-        "name": name,
-        "description": description,
-        "parameters": copy.deepcopy(ABSTRACT_TOOL_PARAMETER),
-        "strict": True
-    }
-
-TOOLS: list[dict[str, Any]] = [
-    _make_tool("open", "open the record's file"),
-    _make_tool("close", "close the record's file")
-]
 
 INSTRUCTIONS = """\
 You are an agent completing a procedure with the supplied tools.
@@ -398,11 +371,27 @@ def create_client(settings: Settings) -> AsyncOpenAI:
     return AsyncOpenAI(**kwargs)
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the agent"
     )
-    parser.add_argument("formula", help="LTL formula enforced by the verifier")
+    parser.add_argument(
+        "scenario_file",
+        help="TOML file defining the tools and named scenarios",
+    )
+    formula_source = parser.add_mutually_exclusive_group(required=True)
+    formula_source.add_argument(
+        "--scenario",
+        "--scenario-name",
+        dest="scenario_name",
+        metavar="NAME",
+        help="use the formula from [scenario.NAME] in the TOML file",
+    )
+    formula_source.add_argument(
+        "--formula",
+        metavar="FORMULA",
+        help="use this LTL formula instead of a named scenario",
+    )
     parser.add_argument("--api-url", default=API_URL)
     parser.add_argument("--api-key", default=API_KEY)
     parser.add_argument("--model", default=MODEL)
@@ -411,7 +400,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-output-tokens", type=int, default=MAX_OUTPUT_TOKENS)
     parser.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT_SECONDS)
     parser.add_argument("--no-color", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+
+    try:
+        args.scenario_config = load_scenario(args.scenario_file)
+        args.formula = _resolve_formula(
+            args.scenario_config,
+            scenario_name=args.scenario_name,
+            formula=args.formula,
+        )
+        args.instructions = _resolve_instructions(
+            args.scenario_config,
+            scenario_name=args.scenario_name,
+        )
+    except ScenarioError as exc:
+        parser.error(str(exc))
+
+    return args
 
 
 def make_env_settings() -> Settings:
@@ -426,18 +431,67 @@ def make_env_settings() -> Settings:
     )
 
 
-def cli_prepare(formula):
+def _resolve_formula(
+    scenario_config: ScenarioConfig,
+    *,
+    scenario_name: str | None,
+    formula: str | None,
+) -> str:
+    if (scenario_name is None) == (formula is None):
+        raise ScenarioError("Specify exactly one of a scenario name or an LTL formula.")
+    if scenario_name is not None:
+        return scenario_config.formula_for(scenario_name)
+    if not formula or not formula.strip():
+        raise ScenarioError("The LTL formula must be a non-empty string.")
+    return formula
+
+
+def _resolve_instructions(
+    scenario_config: ScenarioConfig,
+    *,
+    scenario_name: str | None,
+) -> str:
+    if scenario_name is None:
+        return INSTRUCTIONS
+
+    additional = scenario_config.scenario_for(scenario_name).instructions
+    if not additional or not additional.strip():
+        return INSTRUCTIONS
+    return f"{INSTRUCTIONS.rstrip()}\n\n{additional.strip()}"
+
+
+def cli_prepare(
+    scenario_file: str,
+    *,
+    scenario_name: str | None = None,
+    formula: str | None = None,
+):
     global console, settings, client, provider, verifier, loop
 
+    scenario_config = load_scenario(scenario_file)
+    selected_formula = _resolve_formula(
+        scenario_config,
+        scenario_name=scenario_name,
+        formula=formula,
+    )
+    instructions = _resolve_instructions(
+        scenario_config,
+        scenario_name=scenario_name,
+    )
+    tools = scenario_config.api_tools()
     console = Console()
     settings = make_env_settings()
     client = create_client(settings)
     provider = OpenAIResponsesProvider(client, settings)
-    verifier = SpotVerifier({tool["name"] for tool in TOOLS}, formula)
+    verifier = SpotVerifier(
+        tool_names=scenario_config.tool_names,
+        formula=selected_formula,
+    )
     loop = AgentLoop(
         provider=provider,
         verifier=verifier,
-        tools=TOOLS,
+        tools=tools,
+        instructions=instructions,
         console=console,
         max_turns=settings.max_turns,
     )
@@ -446,6 +500,7 @@ def cli_prepare(formula):
 async def _async_main() -> None:
     args = _parse_args()
     console = Console(use_color=not args.no_color)
+    tools = args.scenario_config.api_tools()
 
     settings = Settings(
         api_url=args.api_url,
@@ -461,13 +516,14 @@ async def _async_main() -> None:
     try:
         provider = OpenAIResponsesProvider(client, settings)
         verifier = SpotVerifier(
-            tool_names=[tool["name"] for tool in TOOLS],
+            tool_names=args.scenario_config.tool_names,
             formula=args.formula,
         )
         loop = AgentLoop(
             provider=provider,
             verifier=verifier,
-            tools=TOOLS,
+            tools=tools,
+            instructions=args.instructions,
             console=console,
             max_turns=settings.max_turns,
         )
