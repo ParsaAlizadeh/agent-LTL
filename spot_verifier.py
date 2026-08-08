@@ -19,7 +19,7 @@ class SpotVerifier:
         pass
 
 
-class SpotAutomata:
+class SpotBackend:
     @dataclass
     class Edge:
         """
@@ -27,7 +27,7 @@ class SpotAutomata:
         Need to store acceptance information if needed.
         """
 
-        parent: 'SpotAutomata'
+        parent: 'SpotBackend'
         src: int
         dst: int
         cond: buddy.bdd
@@ -40,6 +40,17 @@ class SpotAutomata:
 
         def __repr__(self):
             return self.__str__()
+
+    def __init__(self, formulatxt):
+        self.formula = spot.formula(formulatxt)
+
+        self.automata = spot.translate(self.formula, 'GeneralizedBuchi', 'High')
+        # self.user_write_automata_info(self.automata)
+
+        self.scc_info = spot.scc_info(self.automata)
+        # self.user_write_scc(self.scc_info)
+
+        self.bdd_dict = self.automata.get_dict()
 
 
     def get_edges(self, u):
@@ -86,7 +97,7 @@ class SpotAutomata:
         """
         aut = self.automata
 
-        bdd_dict = aut.get_dict()
+        bdd_dict = self.bdd_dict
         var_names = {
             bdd_dict.varnum(ap): ap.to_str()
             for ap in aut.ap()
@@ -144,15 +155,14 @@ class SpotAutomata:
         """
         Write BDD as a nice formula text.
         """
-        return spot.bdd_format_formula(self.automata.get_dict(), bdd)
+        return spot.bdd_format_formula(self.bdd_dict, bdd)
 
     def make_transet(self, str_transet):
         """
         Turn transition set that has string elements into an integer set
         used internally.
         """
-        d = self.automata.get_dict()
-        return set(map(d.varnum, str_transet))
+        return set(map(self.bdd_dict.varnum, str_transet))
 
     def make_transet_bdd(self, transet):
         """
@@ -160,7 +170,7 @@ class SpotAutomata:
         Can be used to check edge conditions.
         """
         bdd = buddy.bddtrue
-        d = self.automata.get_dict()
+        d = self.bdd_dict
         for ap_obj in self.automata.ap():
             var_id = d.varnum(ap_obj.to_str())
             var_bdd = buddy.bdd_ithvar(var_id)
@@ -169,6 +179,20 @@ class SpotAutomata:
             else:
                 bdd &= buddy.bdd_not(var_bdd)
         return bdd
+
+    def bdd_eval(self, bdd, transet):
+        def visit(node):
+            if node == buddy.bddtrue:
+                return True
+            if node == buddy.bddfalse:
+                return False
+
+            var_id = buddy.bdd_var(node)
+            if var_id in transet:
+                return visit(buddy.bdd_high(node))
+            return visit(buddy.bdd_low(node))
+
+        return visit(bdd)
 
     def advance(self, curset, transet):
         """
@@ -181,13 +205,12 @@ class SpotAutomata:
 
         log('curset', curset)
         nxtset = set()
-        bdd = self.make_transet_bdd(transet)
         # log('transet bdd is', write_bdd(bdd))
         for u in curset:
             log('edges from', u)
             for e in self.automata.out(u):
                 log(' to', e.dst, 'on', self.write_bdd(e.cond))
-                if e.dst not in nxtset and (bdd & e.cond) != buddy.bddfalse:
+                if e.dst not in nxtset and self.bdd_eval(e.cond, transet):
                     log('  matched!')
                     nxtset.add(e.dst)
         return nxtset
@@ -208,7 +231,7 @@ class SpotAutomata:
         Can be used to find halting states
         """
         aut = self.automata
-        bdd_dict = aut.get_dict()
+        bdd_dict = self.bdd_dict
 
         empty_letter = buddy.bddtrue
         for ap in aut.ap():
@@ -225,7 +248,7 @@ class SpotAutomata:
         """
         aut = self.automata
         if word is None:
-            word = self.empty_omega_word(aut)
+            word = self.empty_omega_word()
 
         rooted = copy.copy(aut)
         rooted.set_init_state(state)
@@ -237,7 +260,7 @@ class SpotAutomata:
         """
         aut = self.automata
         if word is None:
-            word = self.empty_omega_word(aut)
+            word = self.empty_omega_word()
 
         halting = []
         for state in range(aut.num_states()):
@@ -248,7 +271,7 @@ class SpotAutomata:
     def get_one_halting_path(self, states, halting_states=None):
         aut = self.automata
         if halting_states is None:
-            halting_states = self.get_halting_states(aut)
+            halting_states = self.get_halting_states()
 
         queue = []
         marked = set()
@@ -272,7 +295,7 @@ class SpotAutomata:
                 if v in marked:
                     continue
 
-                vtoolcost = utoolcost + len(self.bdd_minimal_sat(e.cond, aut))
+                vtoolcost = utoolcost + len(self.bdd_minimal_sat(e.cond))
 
                 vpath = upath.copy()
                 vpath.append(e.cond)
@@ -343,15 +366,4 @@ class SpotAutomata:
                 continue
 
             curset = nxtset
-
-    def setup(self, formulatxt):
-        self.formula = spot.formula(formulatxt)
-
-        self.automata = spot.translate(self.formula, 'GeneralizedBuchi', 'High')
-        self.user_write_automata_info(self.automata)
-
-        self.scc = spot.scc_info(self.automata)
-        self.user_write_scc(self.scc)
-
-        self.bdd_dict = self.automata.get_dict()
 
