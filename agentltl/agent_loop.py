@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import copy
 import json
 import os
@@ -11,6 +10,9 @@ from typing import Any, Protocol
 import textwrap
 
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+
+from .types import ToolCall, VerifierDecision, ResponseProvider, Verifier
+from .spot_verifier import SpotVerifier
 
 
 # Provider configuration. Environment variables and matching CLI flags can
@@ -48,8 +50,8 @@ def _make_tool(name, description):
     }
 
 TOOLS: list[dict[str, Any]] = [
-    _make_tool("tool_a", "record A type checkpoint"),
-    _make_tool("tool_b", "record B type checkpoint")
+    _make_tool("open", "open the record's file"),
+    _make_tool("close", "close the record's file")
 ]
 
 INSTRUCTIONS = """\
@@ -70,41 +72,6 @@ class Settings:
     max_turns: int = MAX_TURNS
     max_output_tokens: int = MAX_OUTPUT_TOKENS
     request_timeout_seconds: float = REQUEST_TIMEOUT_SECONDS
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    call_id: str
-    name: str
-    arguments_json: str
-    item_id: str | None = None
-
-    def parsed_arguments(self) -> Any:
-        return json.loads(self.arguments_json)
-
-
-@dataclass(frozen=True)
-class VerifierDecision:
-    allowed: bool
-    message: str | None = None
-
-
-class ResponseProvider(Protocol):
-    async def respond(
-        self,
-        *,
-        history: list[dict[str, Any]],
-        instructions: str,
-        tools: list[dict[str, Any]],
-    ) -> Any: ...
-
-
-class Verifier(Protocol):
-    def verify_tool_batch(
-        self, batch_id: str, calls: list[ToolCall]
-    ) -> VerifierDecision: ...
-
-    def verify_halt(self) -> VerifierDecision: ...
 
 
 class OpenAIResponsesProvider:
@@ -129,52 +96,6 @@ class OpenAIResponsesProvider:
             stream=False,
             max_output_tokens=self._settings.max_output_tokens,
         )
-
-
-@dataclass
-class PlaceholderVerifier:
-    """Example policy: tool_a must run at least once and tool_b may never run."""
-
-    known_tools: set[str]
-    executed_tool_names: list[str] = field(default_factory=list)
-
-    def verify_tool_batch(
-        self, batch_id: str, calls: list[ToolCall]
-    ) -> VerifierDecision:
-        del batch_id  # Available for real verifier logging/correlation.
-        unknown = sorted({call.name for call in calls} - self.known_tools)
-        if unknown:
-            return VerifierDecision(
-                allowed=False,
-                message=f"Unknown tools are not allowed: {', '.join(unknown)}.",
-            )
-
-        if any(call.name == "tool_b" for call in calls):
-            return VerifierDecision(
-                allowed=False,
-                message=(
-                    "The complete tool batch was rejected because tool_b is forbidden. "
-                    "No tool in this batch was executed. Choose a path that does not "
-                    "request tool_b."
-                ),
-            )
-
-        for call in calls:
-            self.executed_tool_names.append(call.name)
-
-        return VerifierDecision(allowed=True)
-
-
-    def verify_halt(self) -> VerifierDecision:
-        if "tool_a" not in self.executed_tool_names:
-            return VerifierDecision(
-                allowed=False,
-                message=(
-                    "Halting is not allowed yet: tool_a must be successfully called "
-                    "at least once. Continue the procedure and request tool_a."
-                ),
-            )
-        return VerifierDecision(allowed=True)
 
 
 class Console:
@@ -462,6 +383,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the agent"
     )
+    parser.add_argument("formula", help="LTL formula enforced by the verifier")
     parser.add_argument("--api-url", default=API_URL)
     parser.add_argument("--api-key", default=API_KEY)
     parser.add_argument("--model", default=MODEL)
@@ -485,16 +407,14 @@ def make_env_settings() -> Settings:
     )
 
 
-def cli_prepare():
+def cli_prepare(formula):
     global console, settings, client, provider, verifier, loop
 
     console = Console()
     settings = make_env_settings()
     client = create_client(settings)
     provider = OpenAIResponsesProvider(client, settings)
-    verifier = PlaceholderVerifier(
-        known_tools={tool["name"] for tool in TOOLS}
-    )
+    verifier = SpotVerifier({tool["name"] for tool in TOOLS}, formula)
     loop = AgentLoop(
         provider=provider,
         verifier=verifier,
@@ -521,8 +441,9 @@ async def _async_main() -> None:
     client = create_client(settings)
     try:
         provider = OpenAIResponsesProvider(client, settings)
-        verifier = PlaceholderVerifier(
-            known_tools={tool["name"] for tool in TOOLS}
+        verifier = SpotVerifier(
+            tool_names=[tool["name"] for tool in TOOLS],
+            formula=args.formula,
         )
         loop = AgentLoop(
             provider=provider,
@@ -534,7 +455,3 @@ async def _async_main() -> None:
         await loop.run()
     finally:
         await client.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(_async_main())

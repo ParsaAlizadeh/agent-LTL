@@ -5,7 +5,7 @@ import buddy
 import copy
 import heapq
 
-from agent_loop import Verifier, ToolCall, VerifierDecision
+from .types import ToolCall, VerifierDecision
 from dataclasses import dataclass
 
 class SpotVerifier:
