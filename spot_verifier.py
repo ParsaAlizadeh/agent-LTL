@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import spot
 import buddy
 import copy
@@ -6,7 +8,6 @@ import heapq
 from agent_loop import Verifier, ToolCall, VerifierDecision
 from dataclasses import dataclass
 
-@dataclass
 class SpotVerifier:
     def __init__(self, tool_names: list[str], formula: str):
         self.tool_names = tool_names
@@ -46,7 +47,33 @@ class SpotVerifier:
         return VerifierDecision(allowed=False, message=message)
 
     def verify_halt(self) -> VerifierDecision:
-        pass
+        back_res = self.backend.do_halt(self.current_set)
+        if back_res.liveness_error is None:
+            return VerifierDecision(allowed=True)
+        liveness_err = back_res.liveness_error
+        if not liveness_err.can_halt:
+            message = (
+                f"You can never halt. Please continue your procedure."
+            )
+        else:
+            message = (
+                f"You are not allowed to halt at this state."
+            )
+            if liveness_err.halt_examples:
+                example = liveness_err.halt_examples[0]
+                steps = []
+                for tools in example:
+                    if len(tools) == 0:
+                        steps.append("use no tools")
+                    elif len(tools) == 1:
+                        steps.append(f"only use the tool {tools[0]}")
+                    else:
+                        steps.append(f"use the tools {' and '.join(tools)}")
+                message += (
+                    " One sequence of tool batches that allows you to halt is: "
+                    f"{'; then '.join(steps)}."
+                )
+        return VerifierDecision(allowed=False, message=message)
 
 
 class SpotBackend:
@@ -69,8 +96,8 @@ class SpotBackend:
 
     @dataclass
     class TransitionResult:
-        safety_error: SpotBackend.SafetyError | None = None
         next_set: set[int]
+        safety_error: SpotBackend.SafetyError | None = None
 
     @dataclass
     class HaltResult:
@@ -464,4 +491,3 @@ class SpotBackend:
                 continue
 
             curset = nxtset
-
