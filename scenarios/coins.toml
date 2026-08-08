@@ -1,0 +1,40 @@
+[tools.coin_1]
+description = "Select coin 1 for weighting"
+parameters = {}
+
+[tools.coin_2]
+description = "Select coin 2 for weighting"
+parameters = {}
+
+[tools.coin_3]
+description = "Select coin 3 for weighting"
+parameters = {}
+
+[tools.coin_4]
+description = "Select coin 4 for weighting"
+parameters = {}
+
+[tools.coin_5]
+description = "Select coin 5 for weighting"
+parameters = {}
+
+[tools.coin_6]
+description = "Select coin 6 for weighting"
+parameters = {}
+
+[scenario.coin_5]
+
+instructions = """You are within a game. Each tool you have access to \
+represent a coin in this game. When you use a set of tools in your response, \
+all the coins within this set will be weighted, and if the one and only one \
+true coin is in this set, the verifier will allow your response, otherwise \
+all the coins in your set are fake and that is why verifier rejects your response. \
+You need to continue weighting until you weight \
+the true coin only, and then you can finish this game. Try to minimize the number of \
+steps needed to find the true coin, maybe using binary search?"""
+
+formula = """
+G (coin_5 U !(coin_1 || coin_2 || coin_3 || coin_4 || coin_5 || coin_6))
+&&
+F (!coin_1 && !coin_2 && !coin_3 && !coin_4 && coin_5 && !coin_6)
+"""
