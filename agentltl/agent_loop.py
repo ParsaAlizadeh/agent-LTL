@@ -1,30 +1,22 @@
 from __future__ import annotations
 
-import argparse
 import copy
 import json
-import os
-import sys
-import textwrap
-from dataclasses import dataclass
+from collections import Counter
+from enum import Enum
 from typing import Any
 
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
-
-from .scenario import ScenarioConfig, ScenarioError, load_scenario
-from .spot_verifier import SpotVerifier
-from .types import ResponseProvider, ToolCall, Verifier
-
-
-# Provider configuration. Environment variables and matching CLI flags can
-# override these defaults without changing the loop.
-API_URL = os.getenv("AGENT_API_URL", "http://127.0.0.1:11434/v1")
-API_KEY = os.getenv("AGENT_API_KEY", "ollama")
-MODEL = os.getenv("AGENT_MODEL", "gemma4:e2b")
-PROXY_URL = os.getenv("AGENT_PROXY_URL")
-MAX_TURNS = int(os.getenv("AGENT_MAX_TURNS", "50"))
-MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_OUTPUT_TOKENS", "2048"))
-REQUEST_TIMEOUT_SECONDS = float(os.getenv("AGENT_REQUEST_TIMEOUT", "180"))
+from .runtime import Console
+from .types import (
+    AgentLoopBridge,
+    InputContext,
+    InputPhase,
+    ResponseProvider,
+    ToolCall,
+    ToolResult,
+    UserAction,
+    UserActionKind,
+)
 
 
 INSTRUCTIONS = """\
@@ -36,124 +28,10 @@ valid alternative, and continue. Acknowledge tool call failures in your response
 """
 
 
-@dataclass(frozen=True)
-class Settings:
-    api_url: str = API_URL
-    api_key: str = API_KEY
-    model: str = MODEL
-    proxy_url: str | None = PROXY_URL
-    max_turns: int = MAX_TURNS
-    max_output_tokens: int = MAX_OUTPUT_TOKENS
-    request_timeout_seconds: float = REQUEST_TIMEOUT_SECONDS
-
-
-class OpenAIResponsesProvider:
-    """Thin wrapper around the provider's OpenAI-compatible Responses API."""
-
-    def __init__(self, client: AsyncOpenAI, settings: Settings) -> None:
-        self._client = client
-        self._settings = settings
-
-    async def respond(
-        self,
-        *,
-        history: list[dict[str, Any]],
-        instructions: str,
-        tools: list[dict[str, Any]],
-    ) -> Any:
-        return await self._client.responses.create(
-            model=self._settings.model,
-            instructions=instructions,
-            input=history,
-            tools=tools,
-            stream=False,
-            max_output_tokens=self._settings.max_output_tokens,
-        )
-
-
-class Console:
-    COLORS = {
-        "black":    "\033[1;30m",
-        "red":      "\033[1;31m",
-        "green":    "\033[1;32m",
-        "yellow":   "\033[1;33m",
-        "blue":     "\033[1;34m",
-        "purple":   "\033[1;35m",
-        "cyan":     "\033[1;36m",
-        "white":    "\033[1;37m"
-    }
-    RESET = "\033[0m"
-    ROLES = {
-        "User":         COLORS["blue"],
-        "Assistant":    COLORS["green"],
-        "Tool":         COLORS["purple"],
-        "Verifier":     COLORS["red"],
-        "Log":          COLORS["yellow"]
-    }
-
-    def __init__(self, *, use_color: bool = True, stream: Any = None) -> None:
-        self.use_color = use_color
-        self.stream = stream or sys.stdout
-        self.width = 70
-
-    def _make_prefix(self, role, color):
-        prefix = f"[{role:^12}]:"
-        if self.use_color:
-            prefix = f"{color}{prefix}{self.RESET}"
-        return prefix
-
-    def _write(self, role: str, message: str) -> None:
-        prefix = self._make_prefix(role, self.ROLES[role])
-        self.print(f"{prefix} {message}")
-
-    def user(self, message: str) -> None:
-        self._write("User", message)
-
-    def assistant(self, message: str) -> None:
-        self._write("Assistant", message)
-
-    def tool(self, message: str) -> None:
-        self._write("Tool", message)
-
-    def verifier(self, message: str) -> None:
-        self._write("Verifier", message)
-
-    def log(self, message: str) -> None:
-        self._write("Log", message)
-
-    def prompt_for_user(self) -> str | None:
-        prefix = self._make_prefix('User', self.ROLES['User'])
-        print('-' * 90)
-        try:
-            return input(f"{prefix} ").strip()
-        except KeyboardInterrupt:
-            print(file=self.stream, flush=True)
-            return None
-
-    def print(self, message):
-        output = '\n'.join(textwrap.wrap(message))
-        print(output, file=self.stream, flush=True)
-
-
-async def execute_placeholder_tool(call: ToolCall) -> dict[str, Any]:
-    """Replace this function with the actual abstract action implementation."""
-
-    try:
-        arguments = call.parsed_arguments()
-    except json.JSONDecodeError as exc:
-        return {
-            "ok": False,
-            "status": "invalid_arguments",
-            "error": str(exc),
-        }
-
-    return {
-        "ok": True,
-        "status": "executed",
-        "tool": call.name,
-        "arguments": arguments,
-        "message": f"Placeholder implementation for {call.name} completed.",
-    }
+class _InputOutcome(Enum):
+    PROCEED = "proceed"
+    HALTED = "halted"
+    ABORTED = "aborted"
 
 
 class AgentLoop:
@@ -161,14 +39,14 @@ class AgentLoop:
         self,
         *,
         provider: ResponseProvider,
-        verifier: Verifier,
+        bridge: AgentLoopBridge,
         tools: list[dict[str, Any]],
         instructions: str = INSTRUCTIONS,
         console: Console | None = None,
-        max_turns: int = MAX_TURNS,
+        max_turns: int = 50,
     ) -> None:
         self.provider = provider
-        self.verifier = verifier
+        self.bridge = bridge
         self.tools = tools
         self.instructions = instructions
         self.console = console or Console()
@@ -180,22 +58,22 @@ class AgentLoop:
         self.opt_list_tool_names = True
         self.opt_hide_tool_output = True
 
-    async def run(self) -> str:
-        turns = 0
-
-        initial_user_message = self.console.prompt_for_user()
-        if initial_user_message is None:
-            self.console.log("Interrupted. Exiting.")
-            return
-        if initial_user_message:
-            self._append_user_message(initial_user_message)
-        elif self._request_halt():
+    async def run(self) -> None:
+        initial_action = await self.bridge.next_user_action(
+            self._input_context(InputPhase.INITIAL)
+        )
+        initial_outcome = self._handle_user_action(initial_action)
+        if initial_outcome is _InputOutcome.HALTED:
             self.console.log("Conversation complete.")
             return
+        if initial_outcome is _InputOutcome.ABORTED:
+            self.console.log("Interrupted. Exiting.")
+            return
 
+        turns = 0
+        halted = False
         while turns < self.max_turns:
             turns += 1
-
             response = await self.provider.respond(
                 history=copy.deepcopy(self.history),
                 instructions=self.instructions,
@@ -204,106 +82,188 @@ class AgentLoop:
 
             output_items = [_item_to_dict(item) for item in response.output]
             self.history.extend(output_items)
-
-            if not self.opt_hide_reasoning:
-                reasoning_texts = [
-                    summary.text
-                    for item in response.output
-                    if item.type == "reasoning"
-                    for summary in item.summary
-                ]
-                self.console.assistant('[Reasoning]\n' + '\n'.join(reasoning_texts))
-
-            assistant_text = _response_text(response, output_items)
-            self.console.assistant(assistant_text or "[no text]")
+            self._display_response(response, output_items)
 
             calls = _extract_tool_calls(output_items)
-
-            if self.opt_list_tool_names:
-                if calls:
-                    self.console.tool(' '.join(f"{call.name}" for call in calls))
-                else:
-                    self.console.tool('[no tool]')
-            else:
-                for call in calls:
-                    self.console.tool(
-                        f"{call.name} call_id={call.call_id} "
-                        f"arguments={call.arguments_json}"
-                    )
+            self._display_tool_calls(calls)
 
             self._batch_number += 1
             batch_id = f"batch_{self._batch_number:04d}"
-            decision = self.verifier.verify_tool_batch(batch_id, calls)
+            decision = self.bridge.verify_tool_batch(batch_id, calls)
 
             if not decision.allowed:
-                error = decision.message or "The verifier rejected this tool batch."
-                self.console.verifier(f"{batch_id} rejected: {error}")
-
-                for call in calls:
-                    payload = {
-                        "ok": False,
-                        "status": "rejected_before_execution",
-                        "batch_id": batch_id,
-                        "tool": call.name,
-                    }
-                    self._append_tool_output(call, payload)
-
-                feedback = (
-                    f"[Verifier decision {batch_id}]\n"
-                    "The complete proposed tool batch was rejected. No action in the "
-                    f"batch was executed.\n{error}"
-                )
-                self._append_user_message(feedback)
+                self._record_rejection(batch_id, calls, decision.message)
                 continue
 
             self.console.verifier(f"{batch_id} accepted. Proceed to execute.")
-            for call in calls:
-                payload = await execute_placeholder_tool(call)
-                payload["batch_id"] = batch_id
-                self._append_tool_output(call, payload)
+            results = await self.bridge.execute_tool_batch(batch_id, calls)
+            ordered_results = _validate_tool_results(calls, results)
+            for call, result in zip(calls, ordered_results, strict=True):
+                self._append_tool_output(call, result.output)
 
-            user_message = self.console.prompt_for_user()
-            if user_message is None:
+            action = await self.bridge.next_user_action(
+                self._input_context(
+                    InputPhase.AFTER_ACCEPTED_BATCH,
+                    calls=calls,
+                    results=ordered_results,
+                )
+            )
+            outcome = self._handle_user_action(action)
+            if outcome is _InputOutcome.HALTED:
+                halted = True
+                break
+            if outcome is _InputOutcome.ABORTED:
                 self.console.log("Interrupted. Exiting.")
                 return
-            if user_message:
-                self._append_user_message(user_message)
-                continue
 
-            if self._request_halt():
-                break
+        if halted:
+            self.console.log("Conversation complete.")
+        else:
+            self.console.log(
+                "Maximum turns reached without a verifier-approved halt."
+            )
 
-        self.console.log(f'Conversation complete.')
+    def _display_response(
+        self, response: Any, output_items: list[dict[str, Any]]
+    ) -> None:
+        if not self.opt_hide_reasoning:
+            reasoning_texts = [
+                str(summary.text)
+                for item in response.output
+                if getattr(item, "type", None) == "reasoning"
+                for summary in getattr(item, "summary", [])
+            ]
+            if reasoning_texts:
+                self.console.assistant("[Reasoning]\n" + "\n".join(reasoning_texts))
+
+        assistant_text = _response_text(response, output_items)
+        self.console.assistant(assistant_text or "[no text]")
+
+    def _display_tool_calls(self, calls: list[ToolCall]) -> None:
+        if self.opt_list_tool_names:
+            if calls:
+                self.console.tool(" ".join(call.name for call in calls))
+            else:
+                self.console.tool("[no tool]")
+            return
+
+        for call in calls:
+            self.console.tool(
+                f"{call.name} call_id={call.call_id} "
+                f"arguments={call.arguments_json}"
+            )
+
+    def _record_rejection(
+        self,
+        batch_id: str,
+        calls: list[ToolCall],
+        verifier_message: str | None,
+    ) -> None:
+        error = verifier_message or "The verifier rejected this tool batch."
+        self.console.verifier(f"{batch_id} rejected: {error}")
+
+        for call in calls:
+            self._append_tool_output(
+                call,
+                {
+                    "ok": False,
+                    "status": "rejected_before_execution",
+                    "batch_id": batch_id,
+                    "tool": call.name,
+                },
+            )
+
+        self._append_user_message(
+            f"[Verifier decision {batch_id}]\n"
+            "The complete proposed tool batch was rejected. No action in the "
+            f"batch was executed.\n{error}"
+        )
+
+    def _handle_user_action(self, action: UserAction) -> _InputOutcome:
+        if action.kind is UserActionKind.MESSAGE:
+            if action.message is None:
+                raise ValueError("A user-message action must contain a message.")
+            self._append_user_message(action.message)
+            return _InputOutcome.PROCEED
+
+        if action.kind is UserActionKind.CONTINUE:
+            return _InputOutcome.PROCEED
+
+        if action.kind is UserActionKind.ABORT:
+            return _InputOutcome.ABORTED
+
+        if action.kind is UserActionKind.REQUEST_HALT:
+            return (
+                _InputOutcome.HALTED
+                if self._request_halt()
+                else _InputOutcome.PROCEED
+            )
+
+        raise ValueError(f"Unsupported user action: {action.kind!r}")
 
     def _request_halt(self) -> bool:
-        halt_decision = self.verifier.verify_halt()
+        halt_decision = self.bridge.verify_halt()
         if halt_decision.allowed:
             self.console.verifier("Halting accepted.")
             return True
 
         error = halt_decision.message or "The verifier rejected halting."
         self.console.verifier(f"Halting rejected: {error}")
-        feedback = (
-            "[Verifier halt rejection]\n"
-            f"{error}\n"
-        )
-        self._append_user_message(feedback)
+        self._append_user_message(f"[Verifier halt rejection]\n{error}\n")
         return False
 
-    def _append_tool_output(self, call: ToolCall, payload: dict[str, Any]) -> None:
+    def _input_context(
+        self,
+        phase: InputPhase,
+        *,
+        calls: list[ToolCall] | None = None,
+        results: list[ToolResult] | None = None,
+    ) -> InputContext:
+        return InputContext(
+            phase=phase,
+            history=copy.deepcopy(self.history),
+            calls=tuple(calls or ()),
+            results=tuple(results or ()),
+        )
+
+    def _append_tool_output(self, call: ToolCall, payload: Any) -> None:
+        serialized = payload if isinstance(payload, str) else json.dumps(
+            payload, sort_keys=True
+        )
         output = {
             "type": "function_call_output",
             "call_id": call.call_id,
-            "output": json.dumps(payload, sort_keys=True),
+            "output": serialized,
         }
         self.history.append(output)
         if not self.opt_hide_tool_output:
             self.console.tool(
-                f"Result for {call.name} call_id={call.call_id}: {output['output']}"
+                f"Result for {call.name} call_id={call.call_id}: {serialized}"
             )
 
     def _append_user_message(self, message: str) -> None:
         self.history.append({"role": "user", "content": message})
+
+
+def _validate_tool_results(
+    calls: list[ToolCall], results: list[ToolResult]
+) -> list[ToolResult]:
+    expected_ids = [call.call_id for call in calls]
+    result_ids = [result.call_id for result in results]
+    if Counter(result_ids) != Counter(expected_ids):
+        missing = list((Counter(expected_ids) - Counter(result_ids)).elements())
+        unexpected = list((Counter(result_ids) - Counter(expected_ids)).elements())
+        details = []
+        if missing:
+            details.append(f"missing call IDs: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected call IDs: {', '.join(unexpected)}")
+        raise RuntimeError(
+            "Scenario returned invalid tool results (" + "; ".join(details) + ")."
+        )
+
+    by_call_id = {result.call_id: result for result in results}
+    return [by_call_id[call_id] for call_id in expected_ids]
 
 
 def _item_to_dict(item: Any) -> dict[str, Any]:
@@ -352,181 +312,3 @@ def _extract_tool_calls(output_items: list[dict[str, Any]]) -> list[ToolCall]:
             )
         )
     return calls
-
-
-def create_client(settings: Settings) -> AsyncOpenAI:
-    kwargs: dict[str, Any] = {
-        "api_key": settings.api_key,
-        "base_url": settings.api_url,
-        "timeout": settings.request_timeout_seconds,
-    }
-    if settings.proxy_url:
-        # Explicit override for environments where proxy discovery is undesirable
-        # or unavailable. Without this override, OpenAI's HTTPX client reads the
-        # standard HTTP_PROXY/http_proxy, HTTPS_PROXY/https_proxy and NO_PROXY vars.
-        kwargs["http_client"] = DefaultAsyncHttpxClient(
-            proxy=settings.proxy_url,
-            timeout=settings.request_timeout_seconds,
-        )
-    return AsyncOpenAI(**kwargs)
-
-
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run the agent"
-    )
-    parser.add_argument(
-        "scenario_file",
-        help="TOML file defining the tools and named scenarios",
-    )
-    formula_source = parser.add_mutually_exclusive_group(required=True)
-    formula_source.add_argument(
-        "--scenario",
-        "--scenario-name",
-        dest="scenario_name",
-        metavar="NAME",
-        help="use the formula from [scenario.NAME] in the TOML file",
-    )
-    formula_source.add_argument(
-        "--formula",
-        metavar="FORMULA",
-        help="use this LTL formula instead of a named scenario",
-    )
-    parser.add_argument("--api-url", default=API_URL)
-    parser.add_argument("--api-key", default=API_KEY)
-    parser.add_argument("--model", default=MODEL)
-    parser.add_argument("--proxy", default=PROXY_URL)
-    parser.add_argument("--max-turns", type=int, default=MAX_TURNS)
-    parser.add_argument("--max-output-tokens", type=int, default=MAX_OUTPUT_TOKENS)
-    parser.add_argument("--request-timeout", type=float, default=REQUEST_TIMEOUT_SECONDS)
-    parser.add_argument("--no-color", action="store_true")
-    args = parser.parse_args(argv)
-
-    try:
-        args.scenario_config = load_scenario(args.scenario_file)
-        args.formula = _resolve_formula(
-            args.scenario_config,
-            scenario_name=args.scenario_name,
-            formula=args.formula,
-        )
-        args.instructions = _resolve_instructions(
-            args.scenario_config,
-            scenario_name=args.scenario_name,
-        )
-    except ScenarioError as exc:
-        parser.error(str(exc))
-
-    return args
-
-
-def make_env_settings() -> Settings:
-    return Settings(
-        api_url=API_URL,
-        api_key=API_KEY,
-        model=MODEL,
-        proxy_url=PROXY_URL,
-        max_turns=MAX_TURNS,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
-        request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
-    )
-
-
-def _resolve_formula(
-    scenario_config: ScenarioConfig,
-    *,
-    scenario_name: str | None,
-    formula: str | None,
-) -> str:
-    if (scenario_name is None) == (formula is None):
-        raise ScenarioError("Specify exactly one of a scenario name or an LTL formula.")
-    if scenario_name is not None:
-        return scenario_config.formula_for(scenario_name)
-    if not formula or not formula.strip():
-        raise ScenarioError("The LTL formula must be a non-empty string.")
-    return formula
-
-
-def _resolve_instructions(
-    scenario_config: ScenarioConfig,
-    *,
-    scenario_name: str | None,
-) -> str:
-    if scenario_name is None:
-        return INSTRUCTIONS
-
-    additional = scenario_config.scenario_for(scenario_name).instructions
-    if not additional or not additional.strip():
-        return INSTRUCTIONS
-    return f"{INSTRUCTIONS.rstrip()}\n\n{additional.strip()}"
-
-
-def cli_prepare(
-    scenario_file: str,
-    *,
-    scenario_name: str | None = None,
-    formula: str | None = None,
-):
-    global console, settings, client, provider, verifier, loop
-
-    scenario_config = load_scenario(scenario_file)
-    selected_formula = _resolve_formula(
-        scenario_config,
-        scenario_name=scenario_name,
-        formula=formula,
-    )
-    instructions = _resolve_instructions(
-        scenario_config,
-        scenario_name=scenario_name,
-    )
-    tools = scenario_config.api_tools()
-    console = Console()
-    settings = make_env_settings()
-    client = create_client(settings)
-    provider = OpenAIResponsesProvider(client, settings)
-    verifier = SpotVerifier(
-        tool_names=scenario_config.tool_names,
-        formula=selected_formula,
-    )
-    loop = AgentLoop(
-        provider=provider,
-        verifier=verifier,
-        tools=tools,
-        instructions=instructions,
-        console=console,
-        max_turns=settings.max_turns,
-    )
-
-
-async def _async_main() -> None:
-    args = _parse_args()
-    console = Console(use_color=not args.no_color)
-    tools = args.scenario_config.api_tools()
-
-    settings = Settings(
-        api_url=args.api_url,
-        api_key=args.api_key,
-        model=args.model,
-        proxy_url=args.proxy,
-        max_turns=args.max_turns,
-        max_output_tokens=args.max_output_tokens,
-        request_timeout_seconds=args.request_timeout,
-    )
-
-    client = create_client(settings)
-    try:
-        provider = OpenAIResponsesProvider(client, settings)
-        verifier = SpotVerifier(
-            tool_names=args.scenario_config.tool_names,
-            formula=args.formula,
-        )
-        loop = AgentLoop(
-            provider=provider,
-            verifier=verifier,
-            tools=tools,
-            instructions=args.instructions,
-            console=console,
-            max_turns=settings.max_turns,
-        )
-        await loop.run()
-    finally:
-        await client.close()

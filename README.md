@@ -1,13 +1,9 @@
 # Verifier-gated Responses agent
 
-This is a small provider-configurable agent loop built on the OpenAI Python
-client's Responses API. It collects every function call in a model response,
-asks one batch verifier for a decision, and executes either the complete batch
-or none of it.
-
-Tools and LTL policies are loaded from TOML scenario files. The included
-`scenarios/records.toml` example defines `open` and `close` tools and two named
-policies.
+This project provides a provider-configurable agent loop whose tool proposals
+are checked before execution. Scenarios are ordinary Python classes: each
+scenario constructs its own verifier, maps tool calls to verifier symbols,
+executes accepted tools, controls user input, and constructs its own agent loop.
 
 ## Setup
 
@@ -25,63 +21,114 @@ ollama serve
 ollama pull gemma4:e2b
 ```
 
-Run interactively with a named scenario:
+Run a registered scenario:
 
 ```bash
-venv/bin/python -m agentltl scenarios/records.toml \
-  --scenario close_after_open
+venv/bin/python -m agentltl --scenario close_after_open
+venv/bin/python -m agentltl -s coin_5 --true-coin 3 --autonomous
 ```
 
-Or supply an LTL formula separately while using the tools from the same file:
+Use `--list-scenarios` to show the bundled names. `AGENT_SCENARIO` may supply
+the default scenario name, and every scenario can add its own arguments and
+environment-backed defaults.
 
-```bash
-venv/bin/python -m agentltl scenarios/records.toml \
-  --formula 'G(open -> F close)'
+## Development environment
+
+Scenario constructors use normal Python arguments, so they can be exercised
+directly from IPython. `prepare_default_runtime()` creates only the global
+console, settings, client, and provider; it does not create a verifier or loop.
+
+```python
+from agentltl import prepare_default_runtime
+from agentltl.scenarios import CoinScenario
+
+scenario = CoinScenario(true_coin=3, autonomous=True)
+runtime = prepare_default_runtime()
+
+async with runtime:
+    await scenario.main(runtime)
+
+# The scenario retains its loop for inspection.
+scenario.loop.history
 ```
 
-The program prompts for the first user message after startup. An empty prompt
-asks the verifier for permission to halt. Ctrl-C exits cleanly.
+A scenario that adjusts global settings can do so before runtime construction:
 
-## Scenario files
+```python
+from agentltl.runtime import make_env_settings
 
-Each `[tools.NAME]` table requires a description and parameters. Parameter
-values are descriptions; every parameter is translated to a JSON Schema string
-property. When `required` is omitted, all parameters are required.
-
-```toml
-[tools.publish]
-description = "Publish a document"
-required = ["title"] # Optional; defaults to every parameter.
-
-[tools.publish.parameters]
-title = "Title shown to readers"
-notes = "Optional publication notes"
-
-[scenario.reviewed]
-formula = "G(publish -> F archive)"
-instructions = "Explain the publication workflow and use concise review notes."
+settings = scenario.configure_global_settings(make_env_settings())
+runtime = prepare_default_runtime(settings=settings)
 ```
 
-Parameters can also be written as a list of tables:
+For a custom console, client, or provider, construct `Runtime` directly and
+pass it to `scenario.main(runtime)`.
 
-```toml
-[[tools.publish.parameters]]
-name = "title"
-description = "Title shown to readers"
+## Writing a scenario
+
+Subclass `Scenario`, use ordinary constructor arguments for scenario-local
+settings, and implement `create_agent_loop()`. The subclass—not the parent—must
+construct its verifier, scenario bridge, and loop.
+
+```python
+class PublishScenario(Scenario):
+    def __init__(self, destination: str, autonomous: bool = False):
+        super().__init__()
+        self.destination = destination
+        self.autonomous = autonomous
+
+    @classmethod
+    def add_arguments(cls, parser):
+        parser.add_argument("--destination", required=True)
+
+    @classmethod
+    def from_parsed_args(cls, args):
+        return cls(destination=args.destination)
+
+    def create_agent_loop(self, runtime):
+        verifier = SpotVerifier("G(publish -> F archive)")
+        bridge = MyScenarioBridge(verifier, self.destination)
+        return AgentLoop(
+            provider=runtime.provider,
+            bridge=bridge,
+            tools=my_response_api_tools(),
+            console=runtime.console,
+            max_turns=runtime.settings.max_turns,
+        )
 ```
 
-Each `[scenario.NAME]` requires a `formula` and may include `instructions`.
-Scenario instructions are appended to the built-in system instructions when
-that named scenario is selected. Select it with `--scenario NAME`, or use
-`--formula` to provide another formula while retaining the file's tool
-definitions and only the built-in instructions.
+Register it for CLI selection with `@register_scenario("publish")` and ensure
+its module is imported by the application.
+
+The bridge controls four interactions:
+
+- It receives raw `ToolCall` batches and maps them to verifier symbols.
+- It returns the verifier decision directly to the loop.
+- For an accepted batch, it returns exactly one `ToolResult` per call ID.
+- It decides whether to supply user text, continue autonomously, request a
+  verified halt, or abort.
+
+Rejected calls never reach the scenario executor. Their tool outputs and retry
+feedback are generated by `AgentLoop`. Accepted result strings are passed
+through unchanged; other JSON-compatible values are serialized into normal
+Responses API `function_call_output` items.
+
+`SpotVerifier` consumes scenario-defined symbol sets rather than tool calls:
+
+```python
+verifier.verify_transition(batch_id, {"publish_action", "authenticated"})
+verifier.verify_halt({"session_closed"})
+```
+
+The terminal symbols describe the valuation that remains true forever after
+halting. Verifier feedback may therefore mention symbols that are not tool
+names.
 
 ## Provider configuration
 
-The top-level constants in `agent_loop.py` read these environment variables:
-
 | Variable | Default |
 | --- | --- |
+| `AGENT_SCENARIO` | unset |
 | `AGENT_API_URL` | `http://127.0.0.1:11434/v1` |
 | `AGENT_API_KEY` | `ollama` |
 | `AGENT_MODEL` | `gemma4:e2b` |
@@ -90,31 +137,9 @@ The top-level constants in `agent_loop.py` read these environment variables:
 | `AGENT_MAX_OUTPUT_TOKENS` | `2048` |
 | `AGENT_REQUEST_TIMEOUT` | `180` seconds |
 
-Matching flags such as `--api-url`, `--api-key`, `--model`, and `--proxy` can
-override them for one run. Without `AGENT_PROXY_URL`, the underlying HTTPX
-client honors the standard `HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`
-and `NO_PROXY` environment variables. `AGENT_PROXY_URL` is an explicit override.
-
-Example using OpenRouter:
-
-```bash
-AGENT_API_URL=https://openrouter.ai/api/v1 \
-AGENT_API_KEY="$OPENROUTER_API_KEY" \
-AGENT_MODEL=provider/model-name \
-venv/bin/python -m agentltl scenarios/records.toml \
-  --scenario close_after_open
-```
-
-## Customization
-
-- Add or edit a TOML scenario file to change tools and LTL policies.
-- Replace `execute_placeholder_tool` with real action dispatch.
-
-The loop deliberately manages a complete local `history` and sends it on each
-request. It does not use `previous_response_id`, Conversations, or server-side
-compaction, so the same control flow can work with stateless Responses-compatible
-providers. A production long-running version should retain a complete audit log
-while compacting the smaller context sent to the model.
+Matching global flags override these values for a CLI run. Without
+`AGENT_PROXY_URL`, the underlying HTTPX client honors the standard proxy
+environment variables.
 
 ## Tests
 

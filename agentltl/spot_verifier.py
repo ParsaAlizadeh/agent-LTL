@@ -1,25 +1,23 @@
 from __future__ import annotations
 
-import spot
 import buddy
 import copy
 import heapq
-
-from .types import ToolCall, VerifierDecision
+import spot
 from dataclasses import dataclass
 
+from .types import VerifierDecision
+
+
 class SpotVerifier:
-    def __init__(self, tool_names: list[str], formula: str):
-        self.tool_names = tool_names
+    def __init__(self, formula: str):
         self.backend = SpotBackend(formula)
         self.current_set = self.backend.get_starting_set()
 
-    def verify_tool_batch(
-        self, batch_id: str, calls: list[ToolCall]
+    def verify_transition(
+        self, batch_id: str, symbols: set[str]
     ) -> VerifierDecision:
-        back_res = self.backend.do_transition(
-            self.current_set, set(call.name for call in calls)
-        )
+        back_res = self.backend.do_transition(self.current_set, symbols)
         if back_res.safety_error is None:
             self.current_set = back_res.next_set
             return VerifierDecision(allowed=True)
@@ -41,24 +39,23 @@ class SpotVerifier:
                 )
             else:
                 message += (
-                    f' One such example is to use the tools '
-                    f'{' and '.join(example)}.'
+                    " One such example is to use the tools "
+                    + " and ".join(example)
+                    + "."
                 )
         return VerifierDecision(allowed=False, message=message)
 
-    def verify_halt(self) -> VerifierDecision:
-        back_res = self.backend.do_halt(self.current_set)
+    def verify_halt(
+        self, terminal_symbols: set[str] | None = None
+    ) -> VerifierDecision:
+        back_res = self.backend.do_halt(self.current_set, terminal_symbols or set())
         if back_res.liveness_error is None:
             return VerifierDecision(allowed=True)
         liveness_err = back_res.liveness_error
         if not liveness_err.can_halt:
-            message = (
-                f"You can never halt. Please continue your procedure."
-            )
+            message = "You can never halt. Please continue your procedure."
         else:
-            message = (
-                f"You are not allowed to halt at this state."
-            )
+            message = "You are not allowed to halt at this state."
             if liveness_err.halt_examples:
                 example = liveness_err.halt_examples[0]
                 steps = []
@@ -134,7 +131,9 @@ class SpotBackend:
         # self.user_write_scc(self.scc_info)
 
         self.bdd_dict = self.automata.get_dict()
-        self.halting_states = self.get_halting_states()
+        self.ap_varnums = {
+            ap.to_str(): self.bdd_dict.varnum(ap) for ap in self.automata.ap()
+        }
 
     def get_starting_set(self) -> set[int]:
         return {self.automata.get_init_state_number()}
@@ -154,17 +153,21 @@ class SpotBackend:
             )
         return self.TransitionResult(next_set=next_set)
 
-    def do_halt(self, current_set: set[int]) -> HaltResult:
-        if not self.halting_states:
+    def do_halt(
+        self, current_set: set[int], terminal_symbols: set[str] | None = None
+    ) -> HaltResult:
+        terminal_word = self.omega_word(terminal_symbols or set())
+        halting_states = self.get_halting_states(terminal_word)
+        if not halting_states:
             return self.HaltResult(
                 liveness_error=self.LivenessError(
                     can_halt=False
                 )
             )
         for state in current_set:
-            if state in self.halting_states:
+            if state in halting_states:
                 return self.HaltResult()
-        path = self.write_one_halting_path(current_set)
+        path = self.write_one_halting_path(current_set, halting_states)
         if path == 'no-path':
             return self.HaltResult(
                 liveness_error=self.LivenessError(
@@ -287,7 +290,14 @@ class SpotBackend:
         Turn transition set that has string elements into an integer set
         used internally.
         """
-        return set(map(self.bdd_dict.varnum, str_transet))
+        # Symbols outside this formula's atomic propositions are irrelevant to
+        # its valuation. This lets a scenario share a richer state alphabet
+        # among multiple verifiers without pre-filtering every transition.
+        return {
+            self.ap_varnums[symbol]
+            for symbol in str_transet
+            if symbol in self.ap_varnums
+        }
 
     def make_transet_bdd(self, transet):
         """
@@ -350,21 +360,20 @@ class SpotBackend:
                 bdd |= e.cond
         return bdd
 
+    def omega_word(self, true_symbols: set[str]):
+        """Return the constant infinite word for one symbol valuation."""
+
+        letter = self.make_transet_bdd(self.make_transet(true_symbols))
+        word = spot.twa_word(self.bdd_dict)
+        word.cycle.append(letter)
+        return word
+
     def empty_omega_word(self):
         """
         Returns the word `\\emptyset^\\omega`.
         Can be used to find halting states
         """
-        aut = self.automata
-        bdd_dict = self.bdd_dict
-
-        empty_letter = buddy.bddtrue
-        for ap in aut.ap():
-            empty_letter &= buddy.bdd_nithvar(bdd_dict.varnum(ap))
-
-        word = spot.twa_word(bdd_dict)
-        word.cycle.append(empty_letter)
-        return word
+        return self.omega_word(set())
 
     def is_halting_state(self, state, word=None):
         """
