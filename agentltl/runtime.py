@@ -28,6 +28,15 @@ class Settings:
     max_turns: int = DEFAULT_MAX_TURNS
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    temperature: float | None = None
+    hide_reasoning: bool = False
+    list_tool_names: bool = True
+    hide_tool_input: bool = True
+    hide_tool_output: bool = True
+
+    def __post_init__(self) -> None:
+        if self.temperature is not None and not 0 <= self.temperature <= 2:
+            raise ValueError("temperature must be between 0 and 2.")
 
 
 class OpenAIResponsesProvider:
@@ -44,14 +53,17 @@ class OpenAIResponsesProvider:
         instructions: str,
         tools: list[dict[str, Any]],
     ) -> Any:
-        return await self._client.responses.create(
-            model=self._settings.model,
-            instructions=instructions,
-            input=history,
-            tools=tools,
-            stream=False,
-            max_output_tokens=self._settings.max_output_tokens,
-        )
+        request: dict[str, Any] = {
+            "model": self._settings.model,
+            "instructions": instructions,
+            "input": history,
+            "tools": tools,
+            "stream": False,
+            "max_output_tokens": self._settings.max_output_tokens,
+        }
+        if self._settings.temperature is not None:
+            request["temperature"] = self._settings.temperature
+        return await self._client.responses.create(**request)
 
 
 class Console:
@@ -152,7 +164,28 @@ def make_env_settings() -> Settings:
                 "AGENT_REQUEST_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT_SECONDS)
             )
         ),
+        temperature=(
+            float(os.environ["AGENT_TEMPERATURE"])
+            if "AGENT_TEMPERATURE" in os.environ
+            else None
+        ),
+        hide_reasoning=_env_bool("AGENT_HIDE_REASONING", False),
+        list_tool_names=_env_bool("AGENT_LIST_TOOL_NAMES", True),
+        hide_tool_input=_env_bool("AGENT_HIDE_TOOL_INPUT", True),
+        hide_tool_output=_env_bool("AGENT_HIDE_TOOL_OUTPUT", True),
     )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value.")
 
 
 def create_client(settings: Settings) -> AsyncOpenAI:

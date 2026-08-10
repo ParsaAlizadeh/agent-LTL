@@ -60,10 +60,13 @@ class UserActionKind(str, Enum):
 class UserAction:
     kind: UserActionKind
     message: str | None = None
+    already_displayed: bool = False
 
     @classmethod
-    def user_message(cls, message: str) -> UserAction:
-        return cls(UserActionKind.MESSAGE, message)
+    def user_message(
+        cls, message: str, *, already_displayed: bool = False
+    ) -> UserAction:
+        return cls(UserActionKind.MESSAGE, message, already_displayed)
 
     @classmethod
     def continue_autonomously(cls) -> UserAction:

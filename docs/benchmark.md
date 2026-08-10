@@ -88,7 +88,7 @@ That combination is the empirical gap worth targeting.
 | --- | --- | --- |
 | [τ-bench / τ³-bench](https://github.com/sierra-research/tau2-bench) | Stateful retail, airline, telecom, and banking workflows; policies, simulated users, database-state evaluation, and repeated-run reliability. The original paper introduced `pass^k`. [Paper](https://arxiv.org/abs/2406.12045) | Best flagship benchmark and direct Agent-C comparison |
 | [STATE-Bench](https://github.com/microsoft/STATE-Bench) | 450 procedural enterprise tasks across travel, customer support, and shopping, with sandbox databases and final-state assertions | Strong second-domain generalization benchmark |
-| [AppWorld](https://arxiv.org/abs/2407.18901) | 750 tasks over 9 realistic apps and 457 APIs, with state-based success and collateral-damage checks; already has an explicit `complete_task` API | Excellent after supporting arguments, outcomes, and larger tool alphabets |
+| [AppWorld](https://arxiv.org/abs/2407.18901) | 750 tasks over 9 realistic apps and 457 APIs, with state-based success and collateral-damage checks; already has an explicit `complete_task` API | A possible later scalability benchmark through a deliberately coarsened tool-name wrapper |
 | [ToolSandbox](https://machinelearning.apple.com/research/toolsandbox-stateful-conversational-llm-benchmark) | Stateful tool execution, intermediate milestone DAGs, user simulation, and tasks involving implicit dependencies | Easiest environment for early integration experiments |
 | [AgentDojo](https://arxiv.org/abs/2406.13352) | 97 realistic tasks and 629 prompt-injection security cases across email, banking, and travel | Adversarial robustness track |
 | [BEHAVIOR-1K](https://arxiv.org/abs/2403.09227) | Human-grounded household activities with intuitive cleanup obligations such as turning appliances off and returning objects | Compelling embodied demonstration, but expensive to integrate |
@@ -114,7 +114,7 @@ independently of environment complexity.
 | Required goal | `F issue_refund` | Rejection of doing nothing and halting |
 | Response/cleanup | `G(begin_return -> F close_case)` | Pending obligations at termination |
 | Commit or compensate | `G(deploy -> F(commit \| rollback))` | Multiple valid recovery paths |
-| Resource lifecycle | `G(lock -> X(!lock U unlock))` | Repeated acquire/release behavior |
+| Resource lifecycle | `G(!(lock & unlock)) & G(lock -> X(!lock U unlock))` | Repeated acquire/release behavior |
 | Mixed policy | Safety conjunction plus response obligations | Interaction between the two checks |
 | Non-terminating policy | `GF heartbeat` | Correctly recognizing that no finite halt is legal |
 
@@ -226,64 +226,120 @@ A comparison between 3, 4, and 5 isolates the actual liveness contribution.
 Comparison 6 addresses the likely reviewer question: “Could this just be
 encoded as a safety rule around `finish`?”
 
-## Major issues to address before a credible evaluation
+## Scope decisions and remaining questions
 
-These issues are more consequential than adding more scenarios.
+Several apparent limitations are deliberate consequences of the project's
+simple propositional-LTL abstraction. They should be stated as assumptions and
+reflected in benchmark selection, rather than treated as implementation defects.
 
-### 1. Tool arguments and identities are currently lost
+### Accepted scope decisions
 
-Calls are reduced to `set(call.name for call in calls)` in
-[`spot_verifier.py`](../agentltl/spot_verifier.py). Real policies require
-“close the same file,” “refund the same order,” and “release the same lock.” The
-project will eventually need parameterized events, grounded propositions, or
-quantified/parametric monitoring.
+#### The benchmark uses tool names as atomic propositions
 
-### 2. Order and multiplicity inside a batch are lost
+For this benchmark profile, each scenario deliberately reduces calls to
+`set(call.name for call in calls)` before invoking `SpotVerifier`. Arguments and
+object identities are outside this benchmark's policy alphabet. The runtime
+also permits scenarios to rename tools or add environment-state symbols, but
+the restricted profile keeps specifications easier to understand and compare.
 
-`{authorize, transfer}` has no internal order, and two transfers become one
-proposition. The project should either formally declare batches simultaneous
-and atomic, enforce one call per response, or linearize calls before
-verification.
+The benchmark guarantee is intentionally about tool-name traces. It cannot
+express “close the same file that was opened” or “refund this particular
+order.” Benchmark scenarios should therefore use policies whose truth depends
+only on tool names, possibly exposing semantically distinct wrapper tools when
+needed. Parameterized or quantified monitoring is a possible extension, not a
+requirement for the present project.
 
-### 3. A proposed call currently satisfies the formula even if execution fails
+#### A response batch is one simultaneous set
 
-The verifier advances before execution in
-[`spot_verifier.py`](../agentltl/spot_verifier.py), while tool execution occurs
-later in [`agent_loop.py`](../agentltl/agent_loop.py). Real monitoring needs
-events such as `proposed`, `started`, `succeeded`, and `failed`, or a
-transactional rollback scheme. Otherwise a failed `close` can discharge an
-obligation.
+Order and multiplicity inside a response are deliberately absent. A letter such
+as `{authorize, transfer}` says that both propositions hold at the same logical
+time; neither call is temporally before the other. This preserves the agent's
+freedom to propose independent actions together.
 
-### 4. Automaton reachability is not environment realizability
+If two tools must not occur simultaneously, a formula such as
+`G(!open | !close)`, equivalently `G(!(open & close))`, forbids their
+co-occurrence. That formula alone does not impose an order. Ordering must be
+specified across batches. For example,
+`G(!(open & close)) & G(open -> X(!open U close))` requires `open` and `close`
+to occur separately and requires a later `close` before another `open`.
+Policies and benchmark descriptions should use these simultaneous-batch
+semantics consistently.
 
-The shortest witness may suggest a tool whose preconditions are false. For
-benchmark-quality feedback, paths should be calculated in the product of the
-policy automaton and the environment state—or suggested calls should at least
-be validated against tool preconditions.
+#### Accepted tool calls are assumed to succeed
 
-### 5. Every exit path must pass through halt verification
+The occurrence of an accepted tool name is treated as the occurrence of the
+corresponding action. Tool failures, partial effects, retries, and rollback are
+outside the present model. Under the assumption that failures can be avoided,
+advancing the automaton when a batch is accepted is consistent with the
+project's semantics.
 
-The current loop can finish because of a turn limit, interruption, or blank user
-input. A benchmark needs an explicit agent `finish` signal, and timeouts or
-max-turn exhaustion must be scored as nontermination rather than successful
-completion.
+Benchmarks should use deterministic, reliable tool implementations and should
+not inject execution failures. A later failure-aware version could introduce
+`proposed`, `succeeded`, or `failed` events, but that additional real-world
+complexity is not needed to evaluate the current theoretical idea.
 
-### 6. Safety-only tasks permit trivial inactivity
+#### Completion witnesses are policy-valid by construction
 
-Temporal conformance should be paired with a task-success oracle or `F goal`;
-otherwise an agent that does nothing may be perfectly safe.
+The suggested completion sequence follows automaton transitions from the
+current active-state set to a state that accepts the scenario's terminal
+valuation forever. Each suggested batch is
+a satisfying valuation of its chosen transition. The full witness therefore
+respects the LTL formula, including its safety constraints, rather than merely
+pointing toward a liveness goal.
 
-### 7. The termination semantics needs a formal comparison
+Under the current abstraction—where the policy depends only on tool names and
+accepted tools are assumed available and successful—this is the relevant notion
+of validity. Environment preconditions and execution failures would create a
+separate realizability problem, but those features are outside the current
+scope.
 
-The evaluation should include `∅^ω`, LTLf, and explicit-`done` semantics. It
-should show where they agree, where they differ, and why permanent tool
-inactivity is appropriate for the intended agents.
+### Remaining questions
+
+#### Completion and waiting are explicit control actions
+
+The scenario-controlled interaction protocol distinguishes user messages,
+autonomous continuation, verified halt requests, and unverified aborts. A
+tool-free response is not itself a termination request. After accepted tools,
+the scenario can continue immediately so the model observes their outputs, ask
+for user input, or explicitly request verification of the terminal valuation.
+
+These out-of-band actions include:
+
+- `continue`, meaning that tool results should be returned to the agent for
+  another model turn;
+- `request_halt`, meaning that the agent believes the procedure is complete and
+  the verifier should check the scenario's terminal valuation forever.
+
+Timeouts, interruptions, explicit aborts, and maximum-turn exhaustion must not
+be counted as verified completion.
+
+#### Persistent inactivity remains outside enforceable liveness
+
+An agent that never requests termination can remain inactive or postpone an
+eventual obligation forever without producing a finite liveness violation. This
+is not an implementation defect that the project can remove; it is the reason
+general liveness cannot be checked like safety from finite prefixes.
+
+The benchmark should nevertheless distinguish policy conformance from utility.
+A task-success oracle prevents a safe but useless no-op run from receiving full
+credit, while max-turn exhaustion or failure to request halt should be reported
+as nontermination. A formula such as `F goal` can reject an attempted premature
+halt, but it cannot force a forever-running agent to attempt `goal`.
+
+#### The termination semantics needs a formal comparison
+
+The evaluation should include `∅^ω`, scenario-defined terminal valuations,
+LTLf, and an explicit end-marker semantics.
+It should show where they agree, where they differ, and why permanent tool
+inactivity is appropriate for the intended agents. This remains both a
+theoretical question and an important part of positioning the contribution.
 
 ## A practical experimental sequence
 
 1. Build 30–50 deterministic formula scenarios and validate the monitor against
    exhaustive traces.
-2. Implement explicit termination and post-execution success events.
+2. Define and implement a protocol that distinguishes continuing after tool
+   execution, waiting for user input, and requesting verified termination.
 3. Port the exact τ-bench subset used by Agent-C for a controlled comparison.
 4. Add liveness annotations to lifecycle operations and run at least five
    trials per task and model.

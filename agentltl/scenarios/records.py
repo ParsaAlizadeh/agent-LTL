@@ -4,7 +4,7 @@ from ..agent_loop import AgentLoop, INSTRUCTIONS
 from ..runtime import Runtime
 from ..scenario import Scenario, register_scenario
 from ..spot_verifier import SpotVerifier
-from ._support import SpotScenarioBridge, placeholder_results, tool_names_as_symbols
+from ._support import SpotScenarioBridge
 
 
 RECORD_TOOLS = [
@@ -54,8 +54,6 @@ class CloseAfterOpenScenario(Scenario):
         bridge = SpotScenarioBridge(
             verifier=verifier,
             console=runtime.console,
-            map_symbols=tool_names_as_symbols,
-            execute_tools=placeholder_results,
         )
         return AgentLoop(
             provider=runtime.provider,
@@ -66,7 +64,7 @@ class CloseAfterOpenScenario(Scenario):
                 "When you open the record, close it before ending the procedure."
             ),
             console=runtime.console,
-            max_turns=runtime.settings.max_turns,
+            settings=runtime.settings,
         )
 
 
@@ -82,8 +80,6 @@ class AlternateRecordsScenario(Scenario):
         bridge = SpotScenarioBridge(
             verifier=verifier,
             console=runtime.console,
-            map_symbols=tool_names_as_symbols,
-            execute_tools=placeholder_results,
         )
         return AgentLoop(
             provider=runtime.provider,
@@ -91,5 +87,5 @@ class AlternateRecordsScenario(Scenario):
             tools=RECORD_TOOLS,
             instructions=INSTRUCTIONS,
             console=runtime.console,
-            max_turns=runtime.settings.max_turns,
+            settings=runtime.settings,
         )

@@ -14,12 +14,18 @@ where proposed language turns into real-world action.
 
 ## Tool use as a temporal trace
 
-Let `T` be the finite set of tools available to the agent. Each model response
-proposes a batch of zero or more tool calls. For verification, that batch is
-represented by the subset of `T` whose tools occur in the response. The exact
-arguments, order, and repeated calls to the same tool are not part of this
-abstraction. For example, a response containing two calls to `open` and one to
-`close` is represented by the single letter `{open, close}`.
+Let `AP` be the finite set of policy symbols chosen by a scenario. Each model
+response proposes a batch of zero or more tool calls. The scenario receives the
+raw calls and maps that proposal, together with any relevant environment state,
+to a subset of `AP`. A simple scenario may map two calls to `open` and one to
+`close` to `{open, close}`; another may instead produce symbols such as
+`{record_open_requested, authenticated}`.
+
+Each response remains one simultaneous logical step. The scenario controls how
+arguments, object identities, environment state, and repeated calls are
+abstracted into propositions; there is no temporal order within a batch. If two
+symbols must not occur together, the policy must forbid their co-occurrence. If
+they must be ordered, the policy must constrain separate responses.
 
 A sequence of responses therefore induces a word over the alphabet `2^T`:
 
@@ -27,9 +33,9 @@ A sequence of responses therefore induces a word over the alphabet `2^T`:
 {open}, {}, {close}, ...
 ```
 
-Here `{}` denotes a step in which the agent uses no tools. LTL propositions are
-the tool names, so a formula describes which infinite words of tool batches are
-permitted. The formula is translated into a nondeterministic Büchi automaton,
+Here `{}` denotes a step whose scenario-defined valuation contains no symbols.
+The formula describes which infinite words of these valuations are permitted.
+It is translated into a nondeterministic Büchi automaton,
 and the enforcer tracks the set of automaton states still active after the
 accepted prefix. A set is needed because the same observed prefix may be
 consistent with several possible automaton runs.
@@ -47,13 +53,15 @@ and the enforcer both remain at their previous state, so a partially executed
 batch cannot leak through the policy gate. The response is returned to the
 agent as a failed proposal, together with:
 
-- a Boolean condition describing the tool combinations that are legal for the
+- a Boolean condition describing the symbol combinations that are legal for the
   next step; and
-- an example satisfying batch, chosen to use as few tool names as possible.
+- an example satisfying valuation, chosen to use as few symbols as possible.
 
 The agent is asked to try again using that feedback. If at least one automaton
 state remains active, the new state set is committed and the entire batch is
-allowed to execute.
+allowed to execute. The model assumes that accepted tool calls are available
+and execute successfully; execution failures and partial effects are outside
+the current abstraction.
 
 This mechanism deals with violations that have a finite, observable bad prefix.
 It does not falsely declare an eventual obligation broken merely because it has
@@ -62,33 +70,39 @@ not yet been completed: on a finite trace, the agent may still fulfill it later.
 ## Interpreting termination
 
 LTL normally describes infinite behavior, while an agent procedure is expected
-to finish. The bridge between the two is to interpret halting as permanent
-inactivity. If the accepted finite trace is `w`, terminating at that point means
-checking the infinite word
+to finish. The scenario supplies a terminal valuation `E` describing the
+symbols that remain true after termination. If the accepted finite trace is
+`w`, terminating at that point means checking the infinite word
 
 ```text
-w . {}^omega
+w . E^omega
 ```
 
-In other words, after halting the agent uses no tool forever. This is stronger
-than observing one tool-free response: a response with no calls contributes one
-`{}` step, whereas halting commits every future step to `{}`.
+The common default is `E = {}`, representing permanent inactivity, but a
+scenario may keep symbols such as `session_closed` true. This is stronger than
+observing one tool-free response: one response contributes one mapped
+valuation, whereas halting commits every future step to `E`.
 
-When the interaction has no new user input and requests termination, the
-enforcer checks whether the infinite empty suffix is accepted from at least one
-currently active automaton state. If it is, all temporal obligations are
+When the orchestration layer determines that termination has been requested,
+the enforcer checks whether the scenario's infinite terminal suffix is accepted from at least
+one currently active automaton state. If it is, all temporal obligations are
 compatible with stopping and the procedure may end. If it is not, halting would
 fail the policy—most importantly when an eventual or other liveness obligation
-remains—so the agent is prompted to continue.
+remains—so the agent is prompted to continue. How the interaction distinguishes
+an agent that is finished from one waiting for tool results or user input is a
+separate protocol question; a tool-free response alone is not necessarily a
+termination request.
 
 When completion is reachable, the feedback includes an example sequence of
 tool batches leading to a state from which halting is valid. The sequence is
 chosen to minimize the number of additional responses and, among equally short
-sequences, the number of tool names used. It is a concrete witness for a fast
+sequences, the number of symbols used. It is a concrete witness for a fast
 way to discharge the remaining obligations, not a requirement that the agent
-follow that exact route. If no such state is reachable, the policy admits no
-valid termination from the current situation and the agent is told that it
-must continue indefinitely.
+follow that exact route. Because it is constructed from satisfying transitions
+of the same policy automaton, the example respects both the safety and liveness
+parts of the formula under the scenario's abstraction. If no such
+state is reachable, the policy admits no valid termination from the current
+situation and the agent is told that it must continue indefinitely.
 
 For example, under `G(open -> F close)`, an accepted `open` creates an eventual
 `close` obligation. Stopping immediately would extend the trace with no future
@@ -104,14 +118,14 @@ world. Safety-like failures are blocked at the first batch that eliminates all
 legal automaton runs; liveness obligations are settled at the moment the finite
 procedure attempts to become an infinite inactive suffix.
 
-The guarantee is deliberately scoped to the chosen abstraction. It concerns
-which tool names occur together and over time. It does not by itself constrain
-tool arguments, natural-language output, tool results, or effects that bypass
-the gated tool interface. Consequently, the intended guarantee relies on all
-relevant real-world actions passing through the enforcer and on rejected calls
-never being executed. Within that boundary, an unreliable or nondeterministic
-agent can be given useful corrective feedback while the policy—not the model's
-own judgment—remains the authority over action and termination.
+The guarantee is deliberately scoped to the scenario's mapping. It concerns
+which supplied symbols occur together and over time. Natural-language output,
+tool results, or effects omitted by that mapping are not constrained.
+Consequently, the intended guarantee relies on all relevant real-world actions
+passing through the scenario bridge and on rejected calls never being executed.
+Within that boundary, an unreliable or nondeterministic agent can be given
+useful corrective feedback while the policy—not the model's own judgment—remains
+the authority over action and termination.
 
 As with runtime monitoring in general, an infinite execution that never asks to
 halt cannot be forced to fulfill a liveness obligation merely by recognizing

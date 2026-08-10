@@ -6,7 +6,7 @@ from collections import Counter
 from enum import Enum
 from typing import Any
 
-from .runtime import Console
+from .runtime import Console, Settings
 from .types import (
     AgentLoopBridge,
     InputContext,
@@ -43,20 +43,25 @@ class AgentLoop:
         tools: list[dict[str, Any]],
         instructions: str = INSTRUCTIONS,
         console: Console | None = None,
-        max_turns: int = 50,
+        settings: Settings | None = None,
+        max_turns: int | None = None,
     ) -> None:
+        resolved_settings = settings or Settings()
         self.provider = provider
         self.bridge = bridge
         self.tools = tools
         self.instructions = instructions
         self.console = console or Console()
-        self.max_turns = max_turns
+        self.max_turns = (
+            resolved_settings.max_turns if max_turns is None else max_turns
+        )
         self.history: list[dict[str, Any]] = []
         self._batch_number = 0
 
-        self.opt_hide_reasoning = False
-        self.opt_list_tool_names = True
-        self.opt_hide_tool_output = True
+        self.opt_hide_reasoning = resolved_settings.hide_reasoning
+        self.opt_list_tool_names = resolved_settings.list_tool_names
+        self.opt_hide_tool_input = resolved_settings.hide_tool_input
+        self.opt_hide_tool_output = resolved_settings.hide_tool_output
 
     async def run(self) -> None:
         initial_action = await self.bridge.next_user_action(
@@ -145,13 +150,10 @@ class AgentLoop:
                 self.console.tool(" ".join(call.name for call in calls))
             else:
                 self.console.tool("[no tool]")
-            return
 
-        for call in calls:
-            self.console.tool(
-                f"{call.name} call_id={call.call_id} "
-                f"arguments={call.arguments_json}"
-            )
+        if not self.opt_hide_tool_input:
+            for call in calls:
+                self.console.tool(_format_tool_call(call))
 
     def _record_rejection(
         self,
@@ -183,6 +185,8 @@ class AgentLoop:
         if action.kind is UserActionKind.MESSAGE:
             if action.message is None:
                 raise ValueError("A user-message action must contain a message.")
+            if not action.already_displayed:
+                self.console.user(action.message)
             self._append_user_message(action.message)
             return _InputOutcome.PROCEED
 
@@ -264,6 +268,29 @@ def _validate_tool_results(
 
     by_call_id = {result.call_id: result for result in results}
     return [by_call_id[call_id] for call_id in expected_ids]
+
+
+def _format_tool_call(call: ToolCall) -> str:
+    try:
+        arguments = call.parsed_arguments()
+    except json.JSONDecodeError:
+        return f"{call.name}({call.arguments_json})"
+    return f"{call.name}({_format_display_value(arguments)})"
+
+
+def _format_display_value(value: Any) -> str:
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        fields = ", ".join(
+            f"{key if key.isidentifier() else json.dumps(key)}: "
+            f"{_format_display_value(item)}"
+            for key, item in value.items()
+        )
+        return "{ " + fields + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_display_value(item) for item in value) + "]"
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _item_to_dict(item: Any) -> dict[str, Any]:

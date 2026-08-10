@@ -44,6 +44,32 @@ def _base_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         type=float,
         default=env_settings.request_timeout_seconds,
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=env_settings.temperature,
+        help="sampling temperature from 0 to 2 (default: provider default)",
+    )
+    parser.add_argument(
+        "--hide-reasoning",
+        action=argparse.BooleanOptionalAction,
+        default=env_settings.hide_reasoning,
+    )
+    parser.add_argument(
+        "--list-tool-names",
+        action=argparse.BooleanOptionalAction,
+        default=env_settings.list_tool_names,
+    )
+    parser.add_argument(
+        "--hide-tool-input",
+        action=argparse.BooleanOptionalAction,
+        default=env_settings.hide_tool_input,
+    )
+    parser.add_argument(
+        "--hide-tool-output",
+        action=argparse.BooleanOptionalAction,
+        default=env_settings.hide_tool_output,
+    )
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument(
         "--list-scenarios",
@@ -90,6 +116,11 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         max_turns=args.max_turns,
         max_output_tokens=args.max_output_tokens,
         request_timeout_seconds=args.request_timeout,
+        temperature=args.temperature,
+        hide_reasoning=args.hide_reasoning,
+        list_tool_names=args.list_tool_names,
+        hide_tool_input=args.hide_tool_input,
+        hide_tool_output=args.hide_tool_output,
     )
 
 
