@@ -22,6 +22,7 @@ from agentltl.scenarios import (
     AlternateRecordsScenario,
     CloseAfterOpenScenario,
     CoinScenario,
+    RetailScenario,
 )
 from agentltl.scenarios.coin_game import weight_calls_to_symbols
 from agentltl.spot_verifier import SpotVerifier
@@ -264,6 +265,14 @@ def test_cli_selects_python_scenario_and_supplies_its_arguments():
     assert scenario.true_coin == 3
 
 
+def test_cli_supplies_retail_goal_option():
+    args = _parse_args(["--scenario", "retail", "--require-target-exchange"])
+    scenario = args.scenario_class.from_parsed_args(args)
+
+    assert isinstance(scenario, RetailScenario)
+    assert scenario.require_target_exchange is True
+
+
 def test_cli_uses_scenario_environment(monkeypatch):
     monkeypatch.setenv("AGENT_SCENARIO", "close_after_open")
     args = _parse_args([])
@@ -271,8 +280,9 @@ def test_cli_uses_scenario_environment(monkeypatch):
 
 
 def test_bundled_scenarios_are_registered():
-    assert scenario_names() == ["alternate", "close_after_open", "coin_game"]
+    assert scenario_names() == ["alternate", "close_after_open", "coin_game", "retail"]
     assert scenario_class_for("alternate") is AlternateRecordsScenario
+    assert scenario_class_for("retail") is RetailScenario
 
 
 def test_spot_verifier_accepts_scenario_defined_state_symbols():
@@ -297,6 +307,7 @@ def test_bundled_scenarios_construct_their_verifier_and_loop():
         CloseAfterOpenScenario(),
         AlternateRecordsScenario(),
         CoinScenario(),
+        RetailScenario(),
     ):
         loop = scenario.create_agent_loop(runtime)
         assert isinstance(loop, AgentLoop)
@@ -334,7 +345,7 @@ def test_coin_game_configures_detailed_tool_call_display():
         [ToolCall("call_1", "weight", '{"coins": [1, 2, 3]}')]
     )
 
-    assert "weight({ coins: [1,2,3]})" in stream.getvalue()
+    assert "weight({ coins: [1, 2, 3]})" in stream.getvalue()
 
 
 def test_coin_game_maps_weight_arguments_to_coin_symbols():

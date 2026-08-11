@@ -2,9 +2,12 @@
 
 The strongest benchmark direction is a termination-aware extension of
 τ-bench/τ³-bench, backed by a small controlled LTL suite. That gives the project
-realistic workflows, deterministic task-success checks, a direct comparison
-with safety-focused runtime enforcers, and scenarios where premature
-termination is visibly harmful.
+realistic workflows, state-based task-success checks, a direct comparison with
+temporal runtime enforcers, and scenarios where premature termination is
+visibly harmful. The first experiments should reproduce one or two workflows
+locally without depending on τ-bench; the actual τ library and evaluator become
+necessary only when claiming benchmark-compatible results or scaling across its
+task sets.
 
 ## How to position the contribution
 
@@ -49,10 +52,18 @@ termination semantics and compared experimentally with LTLf or an explicit
 The closest systems still leave a useful gap:
 
 - [Agent-C](https://arxiv.org/abs/2512.23738) is the most important
-  comparison. It enforces formal temporal safety constraints during tool-call
-  generation and evaluates on τ-bench retail and airline tasks. Its reported
-  emphasis is 100% safety conformance, not Büchi liveness or rejecting
-  premature termination with an accepting-suffix witness.
+  comparison. It enforces formal temporal constraints during tool-call
+  generation and evaluates on τ-bench retail and airline tasks. Although the
+  paper consistently describes these constraints as safety properties, its DSL
+  includes `After(open, close)` and `Exists(...)`, every compliant trace must
+  eventually contain a persistent `Endsafe` event, and its generation algorithm
+  checks the proposed finite trace with `Endsafe` before accepting termination.
+  It can therefore reject termination with a pending response obligation. It
+  does not provide general Büchi-LTL monitoring or an automaton-generated
+  shortest completion suffix, and an invalid termination becomes `Enderror`
+  rather than triggering witness-guided continuation. Agent-C is stronger than
+  this project's default benchmark profile on arguments, object identity, past
+  tool outputs, and developer-provided environment-state projections.
 
 - [AgentSpec](https://arxiv.org/abs/2503.18666) provides customizable runtime
   rules using triggers, predicates, and enforcement actions across code
@@ -72,8 +83,10 @@ The closest systems still leave a useful gap:
   using probabilistic model checking. It provides proactive safety estimates
   rather than hard, general LTL completion checks.
 
-No established benchmark was found that specifically measures the combination
-of:
+Agent-C substantially overlaps with termination-aware completion control, so
+the contribution must not be positioned as the first system to check response
+obligations at termination. The narrower empirical gap is a system that
+specifically measures the combination of:
 
 1. pre-execution rejection of bad prefixes;
 2. rejection of premature completion under `∅^ω`;
@@ -86,7 +99,7 @@ That combination is the empirical gap worth targeting.
 
 | Benchmark | Why it fits | Recommended use |
 | --- | --- | --- |
-| [τ-bench / τ³-bench](https://github.com/sierra-research/tau2-bench) | Stateful retail, airline, telecom, and banking workflows; policies, simulated users, database-state evaluation, and repeated-run reliability. The original paper introduced `pass^k`. [Paper](https://arxiv.org/abs/2406.12045) | Best flagship benchmark and direct Agent-C comparison |
+| [τ-bench / τ³-bench](https://github.com/sierra-research/tau2-bench) | Stateful retail, airline, telecom, and banking workflows; policies, simulated users, database-state evaluation, and repeated-run reliability. The original paper introduced `pass^k`. [Paper](https://arxiv.org/abs/2406.12045) | Best source of realistic pilot workflows and later flagship benchmark; use a separate legacy configuration for Agent-C comparison |
 | [STATE-Bench](https://github.com/microsoft/STATE-Bench) | 450 procedural enterprise tasks across travel, customer support, and shopping, with sandbox databases and final-state assertions | Strong second-domain generalization benchmark |
 | [AppWorld](https://arxiv.org/abs/2407.18901) | 750 tasks over 9 realistic apps and 457 APIs, with state-based success and collateral-damage checks; already has an explicit `complete_task` API | A possible later scalability benchmark through a deliberately coarsened tool-name wrapper |
 | [ToolSandbox](https://machinelearning.apple.com/research/toolsandbox-stateful-conversational-llm-benchmark) | Stateful tool execution, intermediate milestone DAGs, user simulation, and tasks involving implicit dependencies | Easiest environment for early integration experiments |
@@ -99,6 +112,66 @@ LM-emulated tools and judging, while Agent-SafetyBench is broad but mainly
 oriented toward identifying safety failures.
 [ToolEmu](https://arxiv.org/abs/2309.15817),
 [Agent-SafetyBench](https://arxiv.org/abs/2412.14470).
+
+## What using τ-bench means
+
+τ-bench is a task and simulation framework, not itself a formal safety
+verifier. It supplies domain policies, seeded databases, tools, user simulators,
+task definitions, trajectory recording, and end-state evaluation. A local
+scenario inspired by one of its workflows is useful for developing this
+project, but it is not a τ-bench result. A benchmark claim requires running the
+pinned τ environment and its evaluator without silently replacing their
+semantics.
+
+There are therefore two integration levels:
+
+1. **Example-derived local scenario.** Reimplement a small deterministic
+   workflow with this project's `Scenario` and bridge APIs. This requires no
+   τ-bench dependency and is the recommended first step because it isolates the
+   LTL monitor, halt rejection, completion witness, and LLM repair behavior.
+2. **Native τ integration.** Load the real task, database, tools, simulated
+   user, termination reason, and evaluator. This should use the τ library or a
+   pinned τ service process. It is required for scaling and for reporting
+   τ-compatible task rewards or `pass^k`.
+
+The distinction also avoids a packaging problem during the pilot. The current
+τ³-bench release requires Python `>=3.12,<3.14`, while this project currently
+runs with Python 3.14 and uses a Spot binding installed for Python 3.14. A native
+integration may therefore need a Python 3.12/3.13 τ process connected to the
+verifier through a small JSON protocol, unless both dependencies can be built
+in one compatible environment.
+
+### Version and evaluation caveats
+
+The current repository is branded τ³-bench and warns that the original
+standalone τ-bench task repository is outdated. At inspected version 1.0.1,
+commit
+[`668d3bcd`](https://github.com/sierra-research/tau2-bench/tree/668d3bcd135c02aa3438f987ef45735b7c163ee3),
+the `base` splits contain 50 airline, 114 retail, and 114 telecom tasks. The full
+generated telecom set contains 2,285 tasks and is the best eventual source of
+scale.
+
+`evaluation_criteria.actions` is normally one reference trajectory used to
+construct the target environment state. It is not generally a required action
+sequence, and another trace that produces the same correct state may pass.
+Consequently, automatically translating each listed action to `F(action)` would
+overconstrain many tasks. The upstream
+[evaluation guide](https://github.com/sierra-research/tau2-bench/blob/main/docs/evaluation.md)
+explains this replay-based scoring behavior.
+
+The code, task files, and documentation must be audited together at the pinned
+commit. At the inspected 1.0.1 revision, most retail tasks gate reward on an
+LLM-judged natural-language assertion, and some telecom tasks include exact
+action matching in their reward basis, despite broader documentation describing
+the traditional DB-and-communication evaluation. Current retail reward is
+therefore not fully deterministic. Report the individual DB, environment,
+communication, action, and natural-language components rather than treating a
+single aggregate reward as an unqualified deterministic oracle.
+
+Agent-C used 115 retail and 50 airline tasks and manually added 17 adversarial
+tasks per domain. Its public repository does not currently contain the promised
+implementation. A reproducibility track based on its older task version must be
+kept separate from a modern corrected-τ validity track.
 
 ## Recommended benchmark structure
 
@@ -125,8 +198,10 @@ offline oracle.
 
 ### 2. Enterprise lifecycle track
 
-A fixed τ-bench version should be forked and formal policies attached to its
-tool workflows. Suitable scenarios include:
+The first two workflows should be implemented as self-contained, deterministic
+scenarios in this repository. Once their semantics and measurements are stable,
+a fixed τ-bench version should be integrated and formal policies attached to
+its tool workflows. Suitable scenarios include:
 
 - Return initiated → refund or exchange completed → return instructions issued
   → case closed.
@@ -153,6 +228,26 @@ The important pattern is not merely “B must occur after A.” It is:
 
 This is where a safety-only monitor and the termination-aware monitor should
 diverge.
+
+Stock τ retail return and exchange tools perform the status change and related
+notification as one atomic API call. Splitting that call into `begin_return`,
+`issue_refund`, `send_return_instructions`, and `close_case` creates a useful
+enterprise lifecycle benchmark, but it is a synthetic extension rather than an
+unchanged extracted τ task. This distinction must be stated in results.
+
+The most natural stock multi-step response example is the telecom workflow:
+
+```text
+agent: send_payment_request
+user:  make_payment
+agent: resume_line
+user:  reboot_device
+```
+
+For the local pilot, all four actions can be exposed to one agent so witness
+generation is directly testable. In the later conversational version, events
+must be labelled by actor and the verifier must not instruct the agent to invoke
+a user-owned tool.
 
 ### 3. Adversarial track
 
@@ -202,8 +297,8 @@ Other important metrics are:
 
 - Nontermination/max-turn rate.
 
-- Task success and collateral damage from the environment’s deterministic
-  evaluator.
+- Task success and collateral damage from the environment's state-based
+  evaluator, with deterministic and LLM-judged components reported separately.
 
 - Added tokens, latency, and monetary cost.
 
@@ -220,11 +315,15 @@ The critical ablation is:
 4. Safety plus halt gate with generic “continue” feedback.
 5. Safety plus halt gate with the shortest witness.
 6. Explicit `finish` action enforced as an ordinary safety precondition.
-7. Agent-C on the common safety subset.
+7. Agent-C-style `Endsafe` checking without completion-witness repair.
+8. Agent-C on a reproducible common subset if its implementation becomes
+   available.
 
 A comparison between 3, 4, and 5 isolates the actual liveness contribution.
 Comparison 6 addresses the likely reviewer question: “Could this just be
-encoded as a safety rule around `finish`?”
+encoded as a safety rule around `finish`?” Comparison 7 isolates shortest-witness
+generation and recovery from the termination check that Agent-C already
+supports.
 
 ## Scope decisions and remaining questions
 
@@ -278,6 +377,12 @@ not inject execution failures. A later failure-aware version could introduce
 `proposed`, `succeeded`, or `failed` events, but that additional real-world
 complexity is not needed to evaluate the current theoretical idea.
 
+This assumption is appropriate for the local pilot only. A native τ integration
+must not advance the committed automaton state merely because a call was
+proposed and accepted: τ tools can fail. It needs a preview/commit protocol,
+rollback, or an explicit two-phase alphabet so the monitor records the actual
+outcome.
+
 #### Completion witnesses are policy-valid by construction
 
 The suggested completion sequence follows automaton transitions from the
@@ -292,6 +397,14 @@ accepted tools are assumed available and successful—this is the relevant notio
 of validity. Environment preconditions and execution failures would create a
 separate realizability problem, but those features are outside the current
 scope.
+
+This is automaton validity, not environment realizability. A completion witness
+may combine several tools in one simultaneous batch, suggest a user-owned tool,
+or violate an environment precondition. For example,
+`G(send_request -> F make_payment)` permits both propositions in the same batch
+because `F` includes the current position. A strict sequential workflow needs
+`X F`, a generated at-most-one-action invariant, or witness search constrained
+by the environment's action model.
 
 ### Remaining questions
 
@@ -312,6 +425,21 @@ These out-of-band actions include:
 
 Timeouts, interruptions, explicit aborts, and maximum-turn exhaustion must not
 be counted as verified completion.
+
+#### Dialogue events and action ownership need explicit semantics
+
+τ policies refer to user confirmation, assistant messages, and user-executed
+tools in addition to agent tool calls. The current tool-name bridge cannot
+observe these events. A native adapter needs an event layer with at least
+`actor`, `kind`, `name`, arguments, outcome, and selected environment-state
+symbols. Textual events such as a mandatory transfer notice should be extracted
+deterministically or represented by an explicit wrapper action.
+
+Dual-control obligations also need an ownership rule. The system can prevent an
+agent from terminating with an outstanding agent-owned obligation, but it
+cannot guarantee that a simulated or real user eventually acts. Initial
+experiments should either use solo control or state assumptions about user
+cooperation; later work can use assume-guarantee or game-based monitoring.
 
 #### Persistent inactivity remains outside enforceable liveness
 
@@ -336,21 +464,34 @@ theoretical question and an important part of positioning the contribution.
 
 ## A practical experimental sequence
 
-1. Build 30–50 deterministic formula scenarios and validate the monitor against
-   exhaustive traces.
-2. Define and implement a protocol that distinguishes continuing after tool
-   execution, waiting for user input, and requesting verified termination.
-3. Port the exact τ-bench subset used by Agent-C for a controlled comparison.
-4. Add liveness annotations to lifecycle operations and run at least five
-   trials per task and model.
-5. Add STATE-Bench or AppWorld as a generalization domain.
-6. Add AgentDojo-style prompt injection only after the non-adversarial benchmark
+1. Implement one or two example-derived local scenarios without a τ-bench
+   dependency:
+   - a return lifecycle with authentication, `begin_return`, refund or exchange,
+     return instructions, and case closure;
+   - a solo payment-recovery workflow with `send_payment_request`,
+     `make_payment`, `resume_line`, and `reboot_device`.
+2. For each scenario, deliberately trigger premature termination and compare
+   generic halt rejection with shortest-witness feedback and successful repair.
+3. Validate these formulas with exhaustive short traces and targeted mutations,
+   including omitted suffixes, reordered calls, simultaneous calls, and
+   permanently non-haltable formulas.
+4. Define the outcome-aware event protocol needed for real tools: proposed,
+   succeeded, failed, assistant message, user action, and verified halt.
+5. Integrate a pinned modern τ version through its library or a separate
+   process, retaining its real environment, user simulator, evaluator, and
+   trajectory format. Start with a small airline or telecom subset.
+6. Maintain a separate legacy task configuration for an Agent-C comparison;
+   do not mix its older 115-task retail set with corrected modern results.
+7. Scale through reusable workflow profiles rather than one scenario class per
+   task, then run at least five trials per task and model.
+8. Add STATE-Bench or AppWorld as a generalization domain.
+9. Add AgentDojo-style prompt injection only after the non-adversarial benchmark
    is stable.
 
-If only one showcase example is developed, it should use a refund or deployment
-workflow. Let the agent begin an irreversible operation and then confidently
-announce completion too early. A safety-only system has nothing more to reject;
-the termination-aware system rejects termination, supplies `issue_refund;
-close_case` or `health_check; commit/rollback; release_lock`, and measures
-whether the LLM successfully repairs the procedure. That single contrast
-communicates the project’s utility especially well.
+If only one showcase example is developed, it should be the local return
+lifecycle. Let the agent call `begin_return` and then confidently announce
+completion too early. The termination-aware system should reject termination,
+supply a shortest valid suffix such as `issue_refund; send_return_instructions;
+close_case`, and measure whether the same LLM repairs the procedure. This test
+exercises the project's main mechanism without first inheriting τ's dependency,
+versioning, evaluator, user-simulation, and actor-ownership complexity.
