@@ -126,7 +126,7 @@ class Console:
             return None
 
     def print(self, message: str) -> None:
-        output = "\n".join(textwrap.wrap(message))
+        output = "\n".join(textwrap.wrap(message, width=90))
         print(output, file=self.stream, flush=True)
 
 

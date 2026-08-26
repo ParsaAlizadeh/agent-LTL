@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from agentltl.agent_loop import AgentLoop
-from agentltl.cli import _parse_args, _settings_from_args
+from agentltl.cli import _configure_settings, _parse_args, _settings_from_args
 from agentltl.runtime import (
     Console,
     OpenAIResponsesProvider,
@@ -205,6 +205,17 @@ def test_display_options_can_come_from_environment_or_cli(monkeypatch):
     assert cli_settings.list_tool_names is True
     assert cli_settings.hide_tool_input is True
     assert cli_settings.hide_tool_output is True
+
+
+def test_explicit_cli_display_options_override_scenario_settings():
+    argv = ["--scenario", "retail", "--hide-tool-output"]
+    args = _parse_args(argv)
+    scenario = args.scenario_class.from_parsed_args(args)
+
+    settings = _configure_settings(scenario, args, argv)
+
+    assert settings.hide_tool_output is True
+    assert settings.hide_tool_input is False
 
 
 def test_scenario_base_main_delegates_all_loop_initialization():

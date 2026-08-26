@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from dataclasses import replace
 
 from . import scenarios as _bundled_scenarios  # noqa: F401
 from .runtime import Console, Settings, make_env_settings, prepare_default_runtime
-from .scenario import ScenarioError, scenario_class_for, scenario_names
+from .scenario import Scenario, ScenarioError, scenario_class_for, scenario_names
 
 
 def _scenario_name_from_argv(argv: list[str] | None) -> str | None:
@@ -124,6 +125,30 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
     )
 
 
+def _configure_settings(
+    scenario: Scenario,
+    args: argparse.Namespace,
+    argv: list[str] | None,
+) -> Settings:
+    settings = scenario.configure_global_settings(_settings_from_args(args))
+    if not isinstance(settings, Settings):
+        raise TypeError("configure_global_settings() must return Settings.")
+
+    explicit_args = sys.argv[1:] if argv is None else argv
+    display_options = {
+        "hide_reasoning": ("--hide-reasoning", "--no-hide-reasoning"),
+        "list_tool_names": ("--list-tool-names", "--no-list-tool-names"),
+        "hide_tool_input": ("--hide-tool-input", "--no-hide-tool-input"),
+        "hide_tool_output": ("--hide-tool-output", "--no-hide-tool-output"),
+    }
+    overrides = {
+        field: getattr(args, field)
+        for field, option_names in display_options.items()
+        if any(option in explicit_args for option in option_names)
+    }
+    return replace(settings, **overrides)
+
+
 async def _async_main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if args.list_scenarios:
@@ -131,9 +156,7 @@ async def _async_main(argv: list[str] | None = None) -> None:
         return
 
     scenario = args.scenario_class.from_parsed_args(args)
-    settings = scenario.configure_global_settings(_settings_from_args(args))
-    if not isinstance(settings, Settings):
-        raise TypeError("configure_global_settings() must return Settings.")
+    settings = _configure_settings(scenario, args, argv)
 
     runtime = prepare_default_runtime(
         settings=settings,

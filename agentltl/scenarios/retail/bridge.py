@@ -51,14 +51,14 @@ class RetailBridge:
     def verify_tool_batch(
         self, batch_id: str, calls: list[ToolCall]
     ) -> VerifierDecision:
-        self.console.verifier(
-            f"{batch_id} pre-state: {_state_fingerprint(self.state)}"
-        )
+        # self.console.verifier(
+        #     f"{batch_id} pre-state: {_state_fingerprint(self.state)}"
+        # )
         evaluation = evaluate_batch(self.state, calls)
-        self.console.verifier(
-            f"{batch_id} valuation: "
-            + (", ".join(sorted(evaluation.symbols)) or "[empty]")
-        )
+        # self.console.verifier(
+        #     f"{batch_id} valuation: "
+        #     + (", ".join(sorted(evaluation.symbols)) or "[empty]")
+        # )
         decision = self.verifier.verify_transition(batch_id, evaluation.symbols)
         if not decision.allowed:
             return VerifierDecision(
@@ -84,10 +84,10 @@ class RetailBridge:
             raise RuntimeError(f"Batch {batch_id!r} was not prepared.") from exc
         previous = self.state
         self.state = prepared.state
-        self.console.verifier(
-            f"{batch_id} post-state: {_state_fingerprint(self.state)}; "
-            f"changes: {_state_changes(previous, self.state)}"
-        )
+        # self.console.verifier(
+        #     f"{batch_id} post-state: {_state_fingerprint(self.state)}; "
+        #     f"changes: {_state_changes(previous, self.state)}"
+        # )
         return prepared.results
 
     def verify_halt(self) -> VerifierDecision:
