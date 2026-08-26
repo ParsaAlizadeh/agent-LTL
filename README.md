@@ -1,9 +1,22 @@
-# Verifier-gated Responses agent
+# AgentLTL: Monitoring Tool-Call Sequences in LLM Agents with Linear Temporal Logic
 
 This project provides a provider-configurable agent loop whose tool proposals
 are checked before execution. Scenarios are ordinary Python classes: each
 scenario constructs its own verifier, maps tool calls to verifier symbols,
 executes accepted tools, controls user input, and constructs its own agent loop.
+
+AgentLTL expresses safety and liveness conditions as Linear Temporal Logic
+formulas and monitors them throughout the conversation between a user and an
+LLM-based agent. It blocks proposed tool calls that would violate a safety
+condition and returns textual feedback that guides the agent toward a compliant
+execution. If the agent attempts to stop before its liveness obligations are
+satisfied, AgentLTL reports the outstanding conditions and allows the
+conversation to continue until they are fulfilled.
+
+![AgentLTL rejects an early halt and guides the agent to complete a retail exchange](docs/assets/retail-exchange.png)
+
+*AgentLTL rejects an early halt and guides the agent to complete the required
+retail exchange before accepting termination.*
 
 ## Setup
 
