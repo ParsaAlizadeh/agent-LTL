@@ -20,10 +20,20 @@ retail exchange before accepting termination.*
 
 ## Setup
 
-The requested environment is already created in `venv`. To recreate it:
+AgentLTL depends on the Spot library and its Python bindings. Spot cannot be
+installed from PyPI; follow the official [Spot installation
+guide](https://spot.lre.epita.fr/install.html) for your operating system, then
+verify that the system Python can import it:
 
 ```bash
-uv venv venv
+python3 -c "import spot"
+```
+
+The requested environment is already created in `venv`. To recreate it with
+access to the system-installed Spot bindings:
+
+```bash
+uv venv --system-site-packages venv
 uv pip install --python venv/bin/python -r requirements.txt
 ```
 
